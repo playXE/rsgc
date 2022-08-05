@@ -1,0 +1,17 @@
+[package]
+name = "rsgc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+core_extensions = { version = "1.5", features = ["const_val"] }
+libc = "0.2"
+cfg-if = "1.0"
+macro_rules_attribute = "0.1"
+parking_lot = "0.12"
+yastl = "0.1.2"
+[dependencies.memoffset]
+version = "0.6"
+features = ["unstable_const"]

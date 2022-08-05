@@ -1,0 +1,891 @@
+use super::{
+    free_list::FreeList,
+    marker::GCMarker,
+    object_header::{ConstVal, ObjectHeader, VTable, VT},
+    object_start_bitmap::ObjectStartBitmap,
+    traits::{Allocation, Trace},
+    visitor::Visitor,
+};
+use crate::base::{
+    constants::{ALLOCATION_GRANULARITY, OBJECT_ALIGNMENT, WORD_SIZE_LOG2},
+    stack::Stack,
+    utils::{
+        read_float_from_env, read_string_from_env, read_uint_from_env, round_up, TinyBloomFilter,
+    },
+    virtual_memory::{page_size, VirtualMemory},
+};
+use crate::base::{formatted_size, segmented_vec::SegmentedVec};
+use std::{
+    collections::{HashMap, HashSet},
+    ptr::{self, null_mut},
+};
+use std::{
+    mem::size_of,
+    ops::{Deref, DerefMut},
+};
+pub const PAGE_SIZE_LOG2: usize = 17;
+pub const PAGE_SIZE: usize = 1 << PAGE_SIZE_LOG2;
+pub const PAGE_OFFSET_MASK: usize = PAGE_SIZE - 1;
+pub const PAGE_BASE_MASK: usize = !PAGE_OFFSET_MASK;
+pub const PAGE_SIZE_MASK: usize = !(PAGE_SIZE - 1);
+pub const LARGE_OBJECT_SIZE_THRESHOLD: usize = 64 * 1024;
+
+#[allow(dead_code)]
+const TRACE: bool = !false;
+
+unsafe fn free_page(page: *mut Page) {
+    let ptr = &(*page).memory as *const Box<VirtualMemory>;
+    let _ = ptr.read();
+}
+
+#[repr(C)]
+pub struct Page {
+    pub(crate) next: *mut Page,
+    pub(crate) object_end: usize,
+    pub(crate) memory: Box<VirtualMemory>,
+    pub(crate) executable: bool,
+    pub(crate) large: bool,
+}
+
+impl Page {
+    pub fn of(addr: usize) -> *mut Self {
+        (addr & PAGE_SIZE_MASK) as _
+    }
+
+    pub fn object_end(&self) -> usize {
+        self.object_end
+    }
+
+    pub fn set_object_end(&mut self, end: usize) {
+        self.object_end = end;
+    }
+
+    pub fn object_start(&self) -> usize {
+        self.memory.start()
+            + if self.large {
+                LargePage::OBJECT_START_OFFSET
+            } else {
+                NormalPage::OBJECT_START_OFFSET
+            }
+    }
+}
+
+pub struct NormalPage {
+    base: Page,
+    used_in_bytes: usize,
+    bitmap: ObjectStartBitmap,
+}
+
+impl NormalPage {
+    pub fn allocate() -> *mut Self {
+        let mem =
+            VirtualMemory::allocate_aligned(PAGE_SIZE, PAGE_SIZE, false, false, "normal page");
+        match mem {
+            Some(mem) => {
+                let bitmap = ObjectStartBitmap::new(mem.start() + Self::OBJECT_START_OFFSET);
+                let ptr = mem.address().cast::<Self>();
+                unsafe {
+                    ptr.write(Self {
+                        base: Page {
+                            memory: mem,
+                            object_end: 0,
+                            executable: false,
+
+                            large: false,
+                            next: ptr::null_mut(),
+                        },
+
+                        used_in_bytes: 0,
+                        bitmap,
+                    });
+                }
+                ptr
+            }
+
+            None => ptr::null_mut(),
+        }
+    }
+}
+
+impl Deref for NormalPage {
+    type Target = Page;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl DerefMut for NormalPage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
+}
+
+pub struct LargePage {
+    base: Page,
+}
+
+impl Deref for LargePage {
+    type Target = Page;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl DerefMut for LargePage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
+}
+
+impl NormalPage {
+    pub const OBJECT_START_OFFSET: usize =
+        round_up(size_of::<Self>() as _, ALLOCATION_GRANULARITY as _) as usize;
+}
+
+impl LargePage {
+    pub fn allocate(size: usize) -> *mut LargePage {
+        let size = Self::size_in_words(size) << WORD_SIZE_LOG2;
+        let mem = VirtualMemory::allocate_aligned(size, page_size(), false, false, "large page");
+
+        match mem {
+            Some(mem) => {
+                let ptr = mem.address().cast::<Self>();
+                unsafe {
+                    ptr.write(Self {
+                        base: Page {
+                            memory: mem,
+                            object_end: 0,
+                            executable: false,
+                            large: true,
+                            next: ptr::null_mut(),
+                        },
+                    });
+                    (*ptr).set_object_end((*ptr).object_start() + size);
+                }
+                ptr
+            }
+            None => null_mut(),
+        }
+    }
+
+    pub fn size_in_words(size: usize) -> usize {
+        round_up(
+            size as isize + Self::OBJECT_START_OFFSET as isize,
+            page_size() as _,
+        ) as usize
+            >> WORD_SIZE_LOG2
+    }
+
+    pub const OBJECT_START_OFFSET: usize =
+        round_up(size_of::<Self>() as _, ALLOCATION_GRANULARITY as _) as usize;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CollectionScope {
+    Full,
+    Eden,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HeapType {
+    Large,
+    Small,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SweepMode {
+    Synhcronous,
+    Lazy,
+    Concurrent,
+}
+
+#[derive(Debug)]
+pub struct PageSpaceController {
+    pub used_bytes: usize,
+    pub next_collection_initial: usize,
+    pub next_collection_threshold: usize,
+
+    pub size_after_last_collect: usize,
+
+    pub heap_growth_factor: f64,
+    pub heap_growth_factor_max: f64,
+    pub heap_type: HeapType,
+    pub min_heap_size: usize,
+    pub max_heap_size: Option<usize>,
+    pub bounded_heap_size: Option<usize>,
+    pub sweep_mode: SweepMode,
+    pub gc_count: usize,
+}
+
+impl PageSpaceController {
+    pub fn new() -> Self {
+        let heap_type = match read_uint_from_env("HEAP_TYPE") {
+            Some(1) => HeapType::Large,
+            Some(0) => HeapType::Small,
+            _ => HeapType::Small,
+        };
+
+        let heap_growth_factor = match read_float_from_env("HEAP_GROWTH_FACTOR") {
+            Some(factor) if factor > 1.0 => factor,
+            _ => 1.82,
+        };
+        let max_heap_growth_factor = match read_float_from_env("MAX_HEAP_GROWTH_FACTOR") {
+            Some(factor) if factor > 1.0 => 1.24,
+            _ => 1.4,
+        };
+
+        let min_heap_size = match read_uint_from_env("MIN_HEAP_SIZE") {
+            Some(size) => size,
+            None => 32 * 1024 * 1024,
+        };
+
+        let max_heap_size = read_uint_from_env("HEAP_MAX");
+
+        let mut this = Self {
+            size_after_last_collect: 0,
+
+            heap_growth_factor,
+            heap_type,
+            max_heap_size,
+            heap_growth_factor_max: max_heap_growth_factor,
+            next_collection_initial: 0,
+            next_collection_threshold: 0,
+            min_heap_size,
+            bounded_heap_size: None,
+            used_bytes: 0,
+            gc_count: 0,
+            sweep_mode: match read_string_from_env("SWEEP_MODE") {
+                Some(mode) => {
+                    let mode: &str = &mode.to_lowercase();
+                    match mode {
+                        "synchronous" => SweepMode::Synhcronous,
+                        "lazy" => SweepMode::Lazy,
+                        "concurrent" => SweepMode::Concurrent,
+                        _ => SweepMode::Lazy,
+                    }
+                }
+                None => SweepMode::Synhcronous,
+            },
+        };
+
+        this.set_major_threshold_from(0.0);
+
+        this
+    }
+
+    pub fn should_sweep_synchronously(&self) -> bool {
+        match self.sweep_mode {
+            SweepMode::Synhcronous => true,
+            _ => false,
+        }
+    }
+
+    pub fn should_sweep_concurrently(&self) -> bool {
+        self.sweep_mode == SweepMode::Concurrent
+    }
+
+    pub fn min_heap_size(&self) -> usize {
+        self.min_heap_size
+    }
+
+    pub fn proportional_heap_size(&self, heap_size: usize) -> usize {
+        (self.heap_growth_factor * heap_size as f64) as usize
+    }
+
+    pub fn update_allocation_limits(&mut self, visited: usize) {
+        let current_heap_size = visited;
+
+        self.size_after_last_collect = current_heap_size;
+    }
+
+    pub fn set_major_threshold_from(&mut self, mut threshold: f64) -> bool {
+        let threshold_max = self.next_collection_initial as f64 * self.heap_growth_factor_max;
+
+        if threshold > threshold_max {
+            threshold = threshold_max;
+        }
+
+        if threshold < self.min_heap_size as f64 {
+            threshold = self.min_heap_size as f64;
+        }
+        let bounded;
+        if let Some(max_heap_size) = self
+            .max_heap_size
+            .filter(|max_heap_size| threshold > *max_heap_size as f64)
+        {
+            threshold = max_heap_size as f64;
+            bounded = true;
+        } else {
+            bounded = false;
+        }
+
+        self.next_collection_initial = threshold as _;
+        self.next_collection_threshold = threshold as _;
+
+        bounded
+    }
+}
+
+pub struct Pages {
+    freelist: FreeList,
+    controller: PageSpaceController,
+    pages: *mut NormalPage,
+    pages_tail: *mut NormalPage,
+
+    large_pages: *mut LargePage,
+    large_pages_tail: *mut LargePage,
+
+    sweep_pages: *mut NormalPage,
+    sweep_large_pages: *mut LargePage,
+
+    pages_set: HashSet<usize>,
+    filter: TinyBloomFilter,
+
+    pub(crate) weak_refs: SegmentedVec<*mut ObjectHeader>,
+    pub(crate) destructible: SegmentedVec<*mut ObjectHeader>,
+    pub(crate) finalizable: SegmentedVec<*mut ObjectHeader>,
+    pub(crate) run_finalizers: Vec<*mut ObjectHeader>,
+    pub(crate) weak_maps: SegmentedVec<*mut ObjectHeader>,
+    pub(crate) finalize_lock: bool,
+    pub(crate) trace_callbacks: HashMap<u32, Box<dyn Trace>>,
+    pub(crate) key: u32,
+    pub(crate) stack: Stack,
+    pub(crate) max_heap_size_already_raised: bool,
+}
+
+struct Roots {
+    trace_callbacks: *mut HashMap<u32, Box<dyn Trace>>,
+    stack: Stack,
+    finalizable: Vec<*mut ObjectHeader>,
+}
+
+unsafe impl Trace for Roots {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        self.stack
+            .iterate_pointers(&mut |slot: *const *const u8, _| unsafe {
+                visitor.visit_conservative(slot as *mut u8, slot.add(1) as *mut u8);
+            });
+        unsafe {
+            for (_, callback) in (*self.trace_callbacks).iter_mut() {
+                callback.trace(visitor);
+            }
+        }
+
+        for obj in self.finalizable.iter() {
+            // mark objects that are to be finalized as live. Happens only if GC is triggered inside a finalizer.
+            unsafe {
+                visitor.visit_pointer(*obj);
+            }
+        }
+    }
+}
+impl Pages {
+    pub fn new() -> Self {
+        Self {
+            freelist: FreeList::new(),
+            pages: ptr::null_mut(),
+            pages_tail: ptr::null_mut(),
+            large_pages: ptr::null_mut(),
+            large_pages_tail: ptr::null_mut(),
+            sweep_large_pages: ptr::null_mut(),
+            sweep_pages: ptr::null_mut(),
+            controller: PageSpaceController::new(),
+            pages_set: HashSet::with_capacity(8),
+            filter: TinyBloomFilter::new(0),
+            destructible: SegmentedVec::new(),
+            finalizable: SegmentedVec::new(),
+            weak_refs: SegmentedVec::new(),
+            key: 0,
+            trace_callbacks: HashMap::new(),
+            stack: Stack::new(),
+            weak_maps: SegmentedVec::new(),
+            run_finalizers: Vec::new(),
+            max_heap_size_already_raised: false,
+            finalize_lock: false,
+        }
+    }
+
+    pub fn controller(&self) -> &PageSpaceController {
+        &self.controller
+    }
+
+    pub unsafe fn large_pages_statistics(&self) -> (usize, usize) {
+        let mut large_pages_count = 0;
+        let mut large_pages_size = 0;
+        let mut large_pages = self.large_pages;
+        while !large_pages.is_null() {
+            large_pages_count += 1;
+            large_pages_size += (*large_pages).memory.size();
+            large_pages = (*large_pages).next.cast();
+        }
+        (large_pages_count, large_pages_size)
+    }
+
+    pub unsafe fn normal_pages_statistics(&self) -> (usize, usize) {
+        let mut pages_count = 0;
+        let mut pages_size = 0;
+        let mut pages = self.pages;
+        while !pages.is_null() {
+            pages_count += 1;
+            pages_size += (*pages).memory.size();
+            pages = (*pages).next.cast();
+        }
+        (pages_count, pages_size)
+    }
+
+    pub unsafe fn sweep_pages_statistics(&self) -> (usize, usize) {
+        let mut pages_count = 0;
+        let mut pages_size = 0;
+        let mut pages = self.sweep_pages;
+        while !pages.is_null() {
+            pages_count += 1;
+            pages_size += (*pages).memory.size();
+            pages = (*pages).next.cast();
+        }
+        (pages_count, pages_size)
+    }
+
+    unsafe fn add_page(&mut self, page: *mut NormalPage) {
+        if self.pages.is_null() {
+            self.pages = page;
+        } else {
+            (*self.pages_tail).next = page.cast();
+        }
+        self.pages_set.insert(page as usize);
+        self.filter.add_bits(page as usize);
+        self.pages_tail = page;
+    }
+
+    unsafe fn add_large_page(&mut self, page: *mut LargePage) {
+        if self.large_pages.is_null() {
+            self.large_pages = page;
+        } else {
+            (*self.large_pages_tail).next = page.cast();
+        }
+        self.filter.add_bits(page as usize);
+        self.pages_set.insert(page as usize);
+        self.large_pages_tail = page;
+    }
+
+    unsafe fn allocate_page(&mut self, link: bool) -> *mut NormalPage {
+        let page = NormalPage::allocate();
+        if page.is_null() {
+            return null_mut();
+        }
+        if link {
+            self.add_page(page);
+        }
+
+        (*page).set_object_end((*page).memory.end());
+
+        page
+    }
+
+    unsafe fn allocate_large_page(&mut self, size: usize) -> *mut LargePage {
+        let page = LargePage::allocate(size);
+        if page.is_null() {
+            return null_mut();
+        }
+        self.add_large_page(page);
+        page
+    }
+
+    /// Sweeps page lazily until `needs` bytes are freed. When sweeping in synchronous mode `needs` is simply set to usize::MAX
+    /// and sweeping continues up to object_end of page.
+    unsafe fn sweep_page(
+        &mut self,
+        page: *mut NormalPage,
+        free: &mut usize,
+        needs: usize,
+    ) -> usize {
+        let end = (*page).object_end();
+        let mut used_in_bytes = 0;
+        let start = (*page).object_start();
+        let mut current = start;
+
+        let bitmap = &mut (*page).bitmap;
+
+        bitmap.clear();
+
+        while current < end {
+            let raw_obj = current as *mut ObjectHeader;
+            let mut obj_size = (*raw_obj).heap_size();
+            if (*raw_obj).clear_visited() {
+                bitmap.set_bit(raw_obj as _);
+                used_in_bytes += obj_size;
+            } else {
+                let mut free_end = current + obj_size;
+
+                while free_end < end {
+                    let next_obj = free_end as *mut ObjectHeader;
+                    if (*next_obj).is_visited() {
+                        break;
+                    }
+                    free_end += (*next_obj).heap_size();
+                }
+
+                obj_size = free_end - current;
+
+                if current != start || free_end != end {
+                    // only add to freelist if not covering the whole page
+                    self.freelist.free_locked(current, obj_size);
+                    *free += obj_size;
+                    if obj_size >= needs {
+                        (*page).used_in_bytes = used_in_bytes;
+
+                        return used_in_bytes;
+                    }
+                }
+            }
+            current += obj_size;
+        }
+
+        (*page).used_in_bytes = used_in_bytes;
+        used_in_bytes
+    }
+    /// Sweeps normal pages until `size` bytes is available in freelist
+    unsafe fn lazy_sweep(&mut self, size: usize) -> usize {
+        while !self.sweep_pages.is_null() {
+            let next = (*self.sweep_pages).next;
+
+            let used_in_bytes = self.sweep_page(self.sweep_pages, &mut 0, size);
+
+            // it is fine to invoke try_allocate here as `lazy_sweep` is invoked only when free-list does not contain entries for `size` bytes
+            let result = self.freelist.try_allocate(size, false);
+
+            if result != 0 {
+                (*self.sweep_pages).bitmap.set_bit(result);
+                let page = self.sweep_pages;
+                self.sweep_pages = next.cast();
+                self.add_page(page);
+
+                return result;
+            } else if used_in_bytes == 0 {
+                self.controller.used_bytes -= PAGE_SIZE;
+                free_page(self.sweep_pages.cast());
+            } else {
+                // page is still alive but does not have enough memory to allocate
+                self.add_page(self.sweep_pages);
+            }
+            self.sweep_pages = next.cast();
+        }
+
+        0
+    }
+
+    unsafe fn try_allocate_in_fresh_large_page(&mut self, size: usize) -> usize {
+        if self.controller.used_bytes + LargePage::size_in_words(size) << WORD_SIZE_LOG2
+            >= self.controller.next_collection_threshold
+        {
+            return 0;
+        }
+        let page = self.allocate_large_page(size);
+        if page.is_null() {
+            return 0;
+        }
+        self.controller.used_bytes += (*page).memory.size();
+        self.add_large_page(page);
+        (*page).object_start()
+    }
+    #[inline(always)]
+    unsafe fn set_bit(addr: usize) {
+        let page = Page::of(addr).cast::<NormalPage>();
+        (*page).bitmap.set_bit(addr as _);
+    }
+
+    unsafe fn try_allocate_in_fresh_page(&mut self, size: usize) -> usize {
+        let result = self.lazy_sweep(size);
+        if result != 0 {
+            return result;
+        }
+        let result;
+
+        if self.controller.used_bytes + PAGE_SIZE >= self.controller.next_collection_threshold {
+            return 0; // will trigger GC
+        }
+
+        let page = self.allocate_page(true);
+
+        if page.is_null() {
+            return 0;
+        }
+        self.controller.used_bytes += PAGE_SIZE;
+
+        result = (*page).object_start();
+        (*page).bitmap.set_bit(result);
+
+        let free_start = result + size;
+        let free_size = (*page).object_end() as isize - free_start as isize;
+
+        if free_size > 0 {
+            self.freelist.free_locked(free_start, free_size as _);
+        }
+        result
+    }
+
+    unsafe fn try_allocate_internal(&mut self, size: usize) -> usize {
+        let mut result;
+
+        if size <= LARGE_OBJECT_SIZE_THRESHOLD {
+            result = self.freelist.try_allocate_locked(size, false);
+
+            if result == 0 {
+                result = self.try_allocate_in_fresh_page(size);
+            } else {
+                Self::set_bit(result);
+            }
+        } else {
+            result = self.try_allocate_in_fresh_large_page(size);
+        }
+
+        result
+    }
+
+    pub unsafe fn try_allocate_raw(&mut self, size: usize) -> usize {
+        self.try_allocate_internal(size)
+    }
+
+    unsafe fn sweep_regular(&mut self) {
+        let mut page = self.sweep_pages;
+        while !page.is_null() {
+            let next = (*page).next;
+            let used = self.sweep_page(page, &mut 0, usize::MAX);
+            if used != 0 {
+                // if page has live objects we just add it to pages list
+                self.add_page(page);
+                self.controller.used_bytes += PAGE_SIZE;
+            } else {
+                // otherwise we free it
+                // todo: add free page pool
+                free_page(page.cast());
+            }
+            page = next.cast();
+        }
+        self.sweep_pages = null_mut();
+    }
+
+    pub fn sweep(&mut self) {
+        unsafe {
+            self.pages_set.clear();
+            self.sweep_large_pages = self.large_pages;
+            self.large_pages = null_mut();
+            self.filter.reset();
+            self.large_pages_tail = null_mut();
+            self.sweep_pages = self.pages;
+            self.pages_tail = null_mut();
+            self.pages = null_mut();
+            self.controller.used_bytes = 0;
+            self.freelist.reset();
+            // large pages are always sweeped synchronously
+            {
+                // todo: add best-fit free list for large pages?
+                let mut page = self.sweep_large_pages;
+                while !page.is_null() {
+                    let next = (*page).next;
+                    let raw_obj = (*page).object_start() as *mut ObjectHeader;
+                    if (*raw_obj).clear_visited() {
+                        self.add_large_page(page);
+                        self.controller.used_bytes += (*page).memory.size();
+                    } else {
+                        free_page(page.cast());
+                    }
+                    page = next.cast();
+                }
+                self.sweep_large_pages = null_mut();
+            }
+
+            // check if we should sweep right after marking
+            if self.controller.should_sweep_synchronously() {
+                self.sweep_regular();
+            } else {
+                let mut page = self.sweep_pages;
+                while !page.is_null() {
+                    // all pages are considered as live after marking when sweeping is lazy or concurrent
+                    self.controller.used_bytes += PAGE_SIZE;
+
+                    page = (*page).next.cast();
+                }
+            }
+        }
+    }
+
+    pub fn try_pointer_conservative(&self, addr: usize) -> *mut ObjectHeader {
+        let page = Page::of(addr);
+
+        // first use tiny bloom filter
+        if self.filter.rule_out(page as usize) {
+            return null_mut();
+        }
+
+        let page_addr = page as usize;
+        // second check our hashset to be 100% sure that this page is live
+        if !self.pages_set.contains(&page_addr) {
+            return null_mut();
+        }
+
+        unsafe {
+          
+            if (*page).large {
+                // if page is large we simply return its object_start()
+                (*page.cast::<LargePage>()).object_start() as *mut ObjectHeader
+            } else {
+                // normal pages contain ObjectStartBitmap that we can use to find object from raw address
+                let page = page.cast::<NormalPage>();
+                if addr < (*page).object_start() || addr >= (*page).object_end() {
+                    return null_mut();
+                }
+                let header = (*page).bitmap.find_header(addr);
+
+                header
+            }
+        }
+    }
+
+    #[inline(never)]
+    pub fn collect(&mut self) {
+        let verbose = read_uint_from_env("GC_VERBOSE");
+        let time = if let Some(1) = verbose {
+            println!(
+                "[GC({})] start, used: {}",
+                self.controller.gc_count,
+                formatted_size(self.controller.used_bytes)
+            );
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        if self.controller.sweep_mode == SweepMode::Lazy {
+            unsafe {
+                // finish sweeping if needed
+                self.sweep_regular();
+            }
+        }
+
+        let mut marker = GCMarker::new();
+        let mut callbacks = std::mem::replace(&mut self.trace_callbacks, HashMap::new());
+        let mut roots = Roots {
+            stack: self.stack,
+            finalizable: std::mem::replace(&mut self.run_finalizers, vec![]),
+            trace_callbacks: &mut callbacks,
+        };
+        marker.mark(None, self as *const Self, &mut roots);
+        let bytes = marker.marked_bytes();
+        let time_micros = marker.marked_micros();
+        let words_per_micro = (bytes / size_of::<usize>()) as u64 / time_micros as u64;
+        self.run_finalizers = roots.finalizable;
+        self.trace_callbacks = callbacks;
+        self.sweep();
+
+        let bounded = self.controller.set_major_threshold_from(
+            self.controller.used_bytes as f64 * self.controller.heap_growth_factor,
+        );
+        if bounded && self.controller.used_bytes >= self.controller.next_collection_initial {
+            if self.max_heap_size_already_raised {
+                eprintln!("using too much memory, aborting");
+                std::process::abort();
+            }
+
+            self.max_heap_size_already_raised = true;
+            std::panic::panic_any(MemoryError);
+        }
+
+        // last step is to execute finalizers. They are always executed *after* sweep phase.
+        // If they would be executed right after marking there is a chance that they will allocate
+        // extra memory and trigger GC. This is not a problem, but it is not nice.
+        if self.finalize_lock {
+            return; // GC inside finalizer; return without executing finalizers
+        }
+        self.finalize_lock = true;
+
+        while let Some(obj) = self.run_finalizers.pop() {
+            let _ = std::panic::catch_unwind(move || unsafe {
+                match (*obj).vtable().finalize {
+                    Some(cb) => cb(obj.add(1).cast()),
+                    None => (),
+                }
+            });
+        }
+        self.finalize_lock = false;
+
+        if let Some(time) = time {
+            eprintln!("[GC({})] end in {:.04}ms \n  marking: {:.4}ms,\n  mark words per micro: {}\n  heap usage: {}", self.controller.gc_count, time.elapsed().as_micros() as f64 / 1000.0, marker.marked_micros() as f64 / 1000.0, words_per_micro, formatted_size(self.controller.used_bytes));
+        }
+        self.controller.gc_count += 1;
+    }
+
+    unsafe fn collect_and_try_allocate(&mut self, size: usize) -> usize {
+        self.collect();
+        let result = self.try_allocate_internal(size);
+        if result == 0 {
+            std::panic::panic_any(MemoryError);
+        }
+
+        result
+    }
+
+    pub fn malloc_fixedsize<A: 'static + Allocation>(&mut self) -> *mut ObjectHeader {
+        let size = round_up(
+            A::SIZE as isize + size_of::<ObjectHeader>() as isize,
+            OBJECT_ALIGNMENT as _,
+        ) as usize;
+
+        unsafe {
+            let mut result = self.try_allocate_internal(size);
+            if result == 0 {
+                result = self.collect_and_try_allocate(size);
+            }
+            let result = result as *mut ObjectHeader;
+            (*result).set_vtable(VT::<A>::VAL as *const VTable as usize);
+            (*result).set_heap_size(size);
+            (*result).clear_visited_unsync();
+            if !A::HAS_GCPTRS {
+                (*result).set_no_heap_ptrs();
+            }
+            if A::LIGHT_FINALIZER && A::FINALIZE {
+                self.destructible.push(result);
+            } else if A::FINALIZE && !A::LIGHT_FINALIZER {
+                self.finalizable.push(result);
+            }
+            if A::HAS_WEAKPTR {
+                self.weak_refs.push(result);
+            }
+
+            result
+        }
+    }
+
+    pub fn malloc_varsize<A: 'static + Allocation>(&mut self, length: usize) -> *mut ObjectHeader {
+        let size = size_of::<ObjectHeader>() + A::SIZE + (A::VARSIZE_ITEM_SIZE * length);
+        let size = round_up(size as _, OBJECT_ALIGNMENT as _) as usize;
+
+        unsafe {
+            let mut result = self.try_allocate_internal(size);
+            if result == 0 {
+                result = self.collect_and_try_allocate(size);
+            }
+            let result = result as *mut ObjectHeader;
+            (*result).set_vtable(VT::<A>::VAL as *const VTable as usize);
+            (*result).set_heap_size(size);
+            (*result).clear_visited_unsync();
+            if !A::HAS_GCPTRS {
+                (*result).set_no_heap_ptrs();
+            }
+            let data = (*result).data() as *mut u8;
+            data.add(A::VARSIZE_OFFSETOF_LENGTH)
+                .cast::<usize>()
+                .write(length);
+
+            if A::LIGHT_FINALIZER && A::FINALIZE {
+                self.destructible.push(result);
+            } else if A::FINALIZE && !A::LIGHT_FINALIZER {
+                self.finalizable.push(result);
+            }
+
+            if A::HAS_WEAKPTR {
+                self.weak_refs.push(result);
+            }
+            result
+        }
+    }
+}
+
+pub struct MemoryError;
