@@ -10,11 +10,12 @@ use std::{
 use crate::base::formatted_size;
 
 use self::{
-    object_header::{ObjectHeader},
-    page::Pages,
+    object_header::ObjectHeader,
+    page::{PageSpaceConfig, Pages},
     traits::{Allocation, Finalize, ManagedObject, Trace},
 };
 
+//pub mod free_list_old;
 pub mod free_list;
 pub mod marker;
 pub mod object_header;
@@ -23,18 +24,16 @@ pub mod page;
 pub mod page_memory;
 pub mod pointer_block;
 pub mod traits;
-pub mod free_list_new;
 pub mod visitor;
-pub mod immix;
 
 pub struct Heap {
     pages: Pages,
 }
 
 impl Heap {
-    pub fn new() -> Self {
+    pub fn new(config: PageSpaceConfig) -> Self {
         Self {
-            pages: Pages::new(),
+            pages: Pages::new(config),
         }
     }
 
@@ -50,11 +49,22 @@ impl Heap {
     pub fn remove_persistent_root(&mut self, key: u32) -> Option<Box<dyn Trace>> {
         self.pages.trace_callbacks.remove(&key)
     }
-    #[cfg_attr(test, inline(never))]
+
+    pub fn uninit<T: 'static + Allocation + ManagedObject>(&mut self) -> Managed<MaybeUninit<T>> {
+        let header = self.pages.malloc_fixedsize::<T>();
+        unsafe {
+            Managed {
+                header: NonNull::new_unchecked(header),
+                marker: PhantomData,
+            }
+        }
+    }
+
     pub fn manage<T: 'static + Allocation + ManagedObject>(&mut self, value: T) -> Managed<T> {
         let header = self.pages.malloc_fixedsize::<T>();
         unsafe {
             (*header).data_mut().cast::<T>().write(value);
+            (*header).set_initialized();
             Managed {
                 header: NonNull::new_unchecked(header),
                 marker: PhantomData,
@@ -156,11 +166,23 @@ impl std::fmt::Display for HeapStats {
             formatted_size(self.next_collection_threshold)
         )?;
         writeln!(f, "  normal pages count: {}", self.normal_pages_count)?;
-        writeln!(f, "  normal pages size: {}", formatted_size(self.normal_pages_size))?;
+        writeln!(
+            f,
+            "  normal pages size: {}",
+            formatted_size(self.normal_pages_size)
+        )?;
         writeln!(f, "  large pages count: {}", self.large_pages_count)?;
-        writeln!(f, "  large pages size: {}", formatted_size(self.large_pages_size))?;
+        writeln!(
+            f,
+            "  large pages size: {}",
+            formatted_size(self.large_pages_size)
+        )?;
         writeln!(f, "  sweep pages count: {}", self.sweep_pages_count)?;
-        writeln!(f, "  sweep pages size: {}", formatted_size(self.sweep_pages_size))?;
+        writeln!(
+            f,
+            "  sweep pages size: {}",
+            formatted_size(self.sweep_pages_size)
+        )?;
         writeln!(f, "  gc count: {}", self.gc_count)?;
         writeln!(f, "  weak ref count: {}", self.weak_ref_count)?;
         writeln!(f, "  weak map count: {}", self.weak_map_count)?;
@@ -237,8 +259,6 @@ impl<T: ManagedObject + Hash> Hash for Managed<T> {
         (**self).hash(state)
     }
 }
-
-
 
 impl<T: ManagedObject> Deref for Managed<T> {
     type Target = T;

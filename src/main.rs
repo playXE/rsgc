@@ -1,5 +1,6 @@
 use rsgc::{
     memory::{
+        page::PageSpaceConfig,
         traits::{Allocation, Finalize, ManagedObject, Trace},
         Heap,
     },
@@ -44,16 +45,18 @@ fn item_check(tree: Managed<Node>, i: usize) -> i32 {
     }
 }
 #[inline(never)]
-pub fn make_node(heap: &mut Heap, left: Option<Managed<Node>>, right: Option<Managed<Node>>, item: i32) -> Managed<Node> {
-    heap.manage(Node {
-        left,
-        right,
-        item,
-    })
-} 
+pub fn make_node(
+    heap: &mut Heap,
+    left: Option<Managed<Node>>,
+    right: Option<Managed<Node>>,
+    item: i32,
+) -> Managed<Node> {
+    heap.manage(Node { left, right, item })
+}
 
 fn main() {
-    let mut heap = Heap::new();
+    let config = PageSpaceConfig::from_env();
+    let mut heap = Heap::new(config);
     let min_depth = 4;
     let max_depth = min_depth + 2;
     {
@@ -70,7 +73,6 @@ fn main() {
     let _long_lived_tree = bottom_up_tree(&mut heap, 0, max_depth);
 
     for depth in min_depth..max_depth {
-        
         let iterations = 2i32.pow((max_depth - depth + min_depth) as u32);
         let mut check = 0;
         for _ in 0..iterations {
@@ -84,7 +86,6 @@ fn main() {
             depth,
             check
         );
-
     }
     println!(
         "long lived tree of depth {}\t check: {}",

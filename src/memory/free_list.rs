@@ -1,18 +1,15 @@
+use crate::base::constants::*;
 use crate::{
-    base::bitset::BitSet,
-    base::constants::*,
+    base::utils::{round_down_to_power_of_two32, which_power_of_two32},
     memory::object_header::{SizeTag, VtableTag},
 };
-
 use std::{
     mem::size_of,
     ptr::null_mut,
     sync::atomic::{AtomicPtr, AtomicU64, Ordering},
 };
 
-pub const NUM_LISTS: usize = 128;
-pub const INITIAL_FREE_LIST_SEARCH_BUDGET: usize = 1000;
-
+use super::{object_header::ObjectHeader, page::PAGE_SIZE_LOG2};
 #[repr(C)]
 pub struct FreeListElement {
     tags: AtomicU64,
@@ -55,6 +52,16 @@ impl FreeListElement {
         self.next.store(next, Ordering::Relaxed);
     }
 
+    pub fn link(&mut self, next: &mut *mut FreeListElement) {
+        self.set_next(*next);
+        *next = self as *const Self as *mut Self;
+    }
+
+    pub fn unlink(&mut self, next: &mut *mut FreeListElement) {
+        *next = self.next.load(Ordering::Relaxed);
+        self.next.store(null_mut(), Ordering::Relaxed);
+    }
+
     pub fn next(&self) -> *mut Self {
         self.next.load(Ordering::Relaxed)
     }
@@ -83,293 +90,157 @@ impl FreeListElement {
 }
 
 pub struct FreeList {
-    top: usize,
-    end: usize,
+    free_list_heads: [*mut FreeListElement; PAGE_SIZE_LOG2],
+    free_list_tails: [*mut FreeListElement; PAGE_SIZE_LOG2],
+    biggest_free_list_index: usize,
+}
 
-    unaccounted_size: usize,
-
-    free_map: BitSet<{ NUM_LISTS as isize }>,
-
-    free_lists: [*mut FreeListElement; NUM_LISTS + 1],
-
-    freelist_search_budget: isize,
-
-    last_free_small_size: isize,
+#[inline(always)]
+const fn bucket_for_size(size: u32) -> u32 {
+    which_power_of_two32(round_down_to_power_of_two32(size))
 }
 
 impl FreeList {
-    pub fn new() -> Self {
-        let mut this = Self {
-            top: 0,
-            end: 0,
-            unaccounted_size: 0,
-
-            free_map: BitSet::new(),
-            free_lists: [null_mut(); NUM_LISTS + 1],
-            last_free_small_size: 0,
-            freelist_search_budget: 1000,
-        };
-
-        unsafe {
-            this.reset();
-        }
-        this
-    }
-    pub unsafe fn abandon_bump_allocation(&mut self) {
-        if self.top < self.end {
-            self.free(self.top, self.end - self.top);
-            self.top = 0;
-            self.end = 0;
-        }
-    }
-    pub unsafe fn dequeue_element(&mut self, index: usize) -> *mut FreeListElement {
-        let result = self.free_lists[index];
-        let next = (*result).next();
-
-        if next.is_null() && index != NUM_LISTS {
-            let size = index << OBJECT_ALIGNMENT_LOG2;
-
-            if size as isize == self.last_free_small_size {
-                self.last_free_small_size = self.free_map.clear_last_and_find_previous(index as _)
-                    * OBJECT_ALIGNMENT as isize;
-            } else {
-                self.free_map.set(index as _, false);
-            }
-        }
-
-        self.free_lists[index] = next;
-
-        result
-    }   
-    #[inline]
-    pub const fn index_for_size(size: usize) -> usize {
-        let index = size >> OBJECT_ALIGNMENT_LOG2;
-        if index >= NUM_LISTS {
-            NUM_LISTS
-        } else {
-            index
+    pub const fn new() -> Self {
+        Self {
+            free_list_heads: [null_mut(); PAGE_SIZE_LOG2],
+            free_list_tails: [null_mut(); PAGE_SIZE_LOG2],
+            biggest_free_list_index: 0,
         }
     }
 
-    pub unsafe fn try_allocate_bump_locked(&mut self, size: usize) -> usize {
-        let result = self.top;
-        let new_top = result + size;
-        if new_top <= self.end {
-            self.top = new_top;
-            self.unaccounted_size += size;
-            return result;
-        }
-
-        0
+    pub unsafe fn add(&mut self, block: Block) {
+        self.add_returning_unused_blocks(block);
     }
 
-    pub unsafe fn take_unaccounted_size_locked(&mut self) -> usize {
-        let result = self.unaccounted_size;
-        self.unaccounted_size = 0;
-        result
+    pub unsafe fn add_returning_unused_blocks(&mut self, block: Block) -> (*mut u8, *mut u8) {
+        let size = block.size;
+
+        if size < size_of::<FreeListElement>() {
+            filler(block.address as _, size);
+            return (
+                block.address.add(size_of::<ObjectHeader>()),
+                block.address.add(size_of::<ObjectHeader>()),
+            );
+        }
+        let entry = FreeListElement::as_element(block.address as _, size);
+        let index = bucket_for_size(size as u32) as usize;
+
+        (*entry).link(&mut self.free_list_heads[index]);
+        self.biggest_free_list_index = self.biggest_free_list_index.max(index);
+
+        if (*entry).next().is_null() {
+            self.free_list_tails[index] = entry;
+        } 
+
+        (
+            entry
+                .cast::<usize>()
+                .add(FreeListElement::header_size_for(size))
+                .cast(),
+            entry.cast::<u8>().add(size),
+        )
     }
 
-    pub unsafe fn try_allocate_small_locked(&mut self, size: usize) -> usize {
-        if size as isize > self.last_free_small_size {
-            return 0;
-        }
-
-        let index = Self::index_for_size(size);
-        if index != NUM_LISTS && self.free_map.test(index as _) {
-            return self.dequeue_element(index) as _;
-        }
-
-        if index + 1 < NUM_LISTS {
-            let next_index = self.free_map.next(index as isize + 1);
-            if next_index != -1 {
-                let element = self.dequeue_element(next_index as _);
-
-                return element as _;
-            }
-        }
-        0
-    }
-    pub fn add_unaccounted_size(&mut self, size: usize) {
-        self.unaccounted_size += size;
-    }
-    unsafe fn split_element_after_and_enqueue(
-        &mut self,
-        element: *mut FreeListElement,
-        size: usize,
-        is_protected: bool,
-    ) {
-       
-        let remainder_size = (*element).heap_size() - size;
-        if remainder_size == 0 {
-            return;
-        }
-
-        let remainder_address = element as usize + size;
-        let element = FreeListElement::as_element(remainder_address, remainder_size);
-        let remainder_index = Self::index_for_size(remainder_size);
-        self.enqueue_element(element, remainder_index);
-
-        if is_protected {
-            // TBD
-        }
-    }  
-    #[inline]
-    pub unsafe fn try_allocate_inline(&mut self, size: usize) -> usize {
-        let index = Self::index_for_size(size);
-        if index != NUM_LISTS && self.free_map.test(index as _) {
-            let element = self.dequeue_element(index);
-
-            return element as usize;
-        }
-
-        self.try_allocate_locked(size, false)
-    }
-
-    pub unsafe fn try_allocate_locked(&mut self, size: usize, is_protected: bool) -> usize {
-        let index = Self::index_for_size(size);
-        if index != NUM_LISTS && self.free_map.test(index as _) {
-            let element = self.dequeue_element(index);
-
-            return element as usize;
-        }
-
-        if index + 1 < NUM_LISTS {
-            let next_index = self.free_map.next(index as isize + 1);
-
-            if next_index != -1 {
-                let element = self.dequeue_element(next_index as _);
-
-                self.split_element_after_and_enqueue(element, size, is_protected);
-                return element as _;
-            }
-        }
-
-        let mut previous = null_mut::<FreeListElement>();
-        let mut current = self.free_lists[NUM_LISTS];
-
-        let mut tries_left = self.freelist_search_budget + (size >> WORD_SIZE_LOG2) as isize;
-
-        while !current.is_null() {
-            if (*current).heap_size() >= size {
-                let remainder_size = (*current).heap_size() - size;
-                let _region_size = size + FreeListElement::header_size_for(remainder_size);
-
-                if previous.is_null() {
-                    self.free_lists[NUM_LISTS] = (*current).next();
-                } else {
-                    (*previous).set_next((*current).next());
+    pub unsafe fn allocate(&mut self, allocation_size: usize) -> Block {
+        // Try reusing a block from the largest bin. The underlying reasoning
+        // being that we want to amortize this slow allocation call by carving
+        // off as a large a free block as possible in one go; a block that will
+        // service this block and let following allocations be serviced quickly
+        // by bump allocation.
+        // bucket_size represents minimal size of entries in a bucket.
+        let mut bucket_size = 1 << self.biggest_free_list_index;
+        let mut index = self.biggest_free_list_index;
+        while index > 0 {
+            debug_assert!(
+                self.is_consistent(index),
+                "unconsistent free list at index {} (size {}), head: {:p}, tail: {:p}",
+                index,
+                bucket_size,
+                self.free_list_heads[index],
+                self.free_list_tails[index]
+            );
+            let entry = self.free_list_heads[index];
+            if allocation_size > bucket_size {
+                // Final bucket candidate; check initial entry if it is able
+                // to service this allocation. Do not perform a linear scan,
+                // as it is considered too costly.
+                if entry.is_null() || (*entry).heap_size() < allocation_size {
+                    break;
                 }
-                self.split_element_after_and_enqueue(current, size, is_protected);
-
-                self.freelist_search_budget = tries_left.min(INITIAL_FREE_LIST_SEARCH_BUDGET as _);
-                return current as _;
-            } else if {
-                let x = tries_left;
-                tries_left -= 1;
-                x < 0
-            } {
-                self.freelist_search_budget = INITIAL_FREE_LIST_SEARCH_BUDGET as _;
-                return 0;
             }
-            previous = current;
-            current = (*current).next();
-        }
-        0
-    }
 
-    pub unsafe fn try_allocate(&mut self, size: usize, is_protected: bool) -> usize {
-        let res = self.try_allocate_locked(size, is_protected);
-
-        res
-    }
-
-    pub unsafe fn free_locked(&mut self, address: usize, size: usize) {
-        /*static OCCUR: AtomicUsize = AtomicUsize::new(0);
-        if format!("{:x}",address).ends_with("450") && OCCUR.fetch_add(1, Ordering::Relaxed) == 1{
-            panic!();
-        }*/
-        let element = FreeListElement::as_element(address, size);
-        let index = Self::index_for_size(size);
-        self.enqueue_element(element, index);
-    }
-    pub unsafe fn reset(&mut self) {
-        self.free_map.reset();
-        self.last_free_small_size = -1;
-        for i in 0..NUM_LISTS + 1 {
-            self.free_lists[i] = null_mut();
-        }
-    }
-
-    pub unsafe fn length_locked(&self, index: usize) -> usize {
-        let mut current = self.free_lists[index];
-        let mut count = 0;
-        while !current.is_null() {
-            count += 1;
-            current = (*current).next();
-        }
-        count
-    }
-
-    pub unsafe fn make_iterable(&mut self) {
-        if self.top < self.end {
-            FreeListElement::as_element(self.top, self.end - self.top);
-        }
-    }
-
-    pub unsafe fn try_allocate_large(&mut self, size: usize) -> *mut FreeListElement {
-        let res = self.try_allocate_large_locked(size);
-
-        res
-    }
-
-    pub unsafe fn try_allocate_large_locked(
-        &mut self,
-        minimum_size: usize,
-    ) -> *mut FreeListElement {
-        let mut previous = null_mut::<FreeListElement>();
-        let mut current = self.free_lists[NUM_LISTS];
-
-        let mut tries_left =
-            self.freelist_search_budget + (minimum_size >> WORD_SIZE_LOG2) as isize;
-        while !current.is_null() {
-            let next = (*current).next();
-            if (*current).heap_size() >= minimum_size {
-                if previous.is_null() {
-                    self.free_lists[NUM_LISTS] = next;
-                } else {
-                    (*previous).set_next(next);
+            if !entry.is_null() {
+                if (*entry).next().is_null() {
+                    debug_assert_eq!(
+                        self.free_list_tails[index], entry,
+                        "tail should be the same as head at index {} {:p}",
+                        index, entry
+                    );
+                    self.free_list_tails[index] = null_mut();
                 }
-                self.freelist_search_budget = tries_left.min(INITIAL_FREE_LIST_SEARCH_BUDGET as _);
-                return current;
-            } else if {
-                let x = tries_left;
-                tries_left -= 1;
-                x < 0
-            } {
-                self.freelist_search_budget = INITIAL_FREE_LIST_SEARCH_BUDGET as _;
-                return null_mut();
+
+                (*entry).unlink(&mut self.free_list_heads[index]);
+                self.biggest_free_list_index = index;
+
+                return Block {
+                    address: entry.cast(),
+                    size: (*entry).heap_size(),
+                };
             }
-
-            previous = current;
-            current = (*current).next();
+            index -= 1;
+            bucket_size >>= 1;
         }
 
-        null_mut()
-    }
-    pub unsafe fn free(&mut self, address: usize, size: usize) {
-        self.free_locked(address, size);
-    }
-    pub unsafe fn enqueue_element(&mut self, element: *mut FreeListElement, index: usize) {
-        let next = self.free_lists[index];
-        if next.is_null() && index != NUM_LISTS {
-            self.free_map.set(index as _, true);
-            self.last_free_small_size = self
-                .last_free_small_size
-                .max((index as isize) << OBJECT_ALIGNMENT_LOG2);
+        self.biggest_free_list_index = index;
+        Block {
+            address: null_mut(),
+            size: 0,
         }
+    }
 
-        (*element).set_next(next);
-        self.free_lists[index] = element;
+    pub fn clear(&mut self) {
+        self.free_list_heads.fill(null_mut());
+        self.free_list_tails.fill(null_mut());
+
+        self.biggest_free_list_index = 0;
+    }
+
+    pub fn size(&self) -> usize {
+        let mut size = 0;
+        for mut entry in self.free_list_heads.iter().copied() {
+            unsafe {
+                while !entry.is_null() {
+                    size += (*entry).heap_size();
+                    entry = (*entry).next();
+                }
+            }
+        }
+        size
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.free_list_heads.iter().all(|entry| entry.is_null())
+    }
+
+    pub unsafe fn is_consistent(&self, index: usize) -> bool {
+        let first_cond = self.free_list_heads[index].is_null() && self.free_list_tails[index].is_null();
+        let second_cond = !self.free_list_heads[index].is_null() && !self.free_list_tails[index].is_null()
+            && (*self.free_list_tails[index]).next().is_null();
+
+        first_cond || second_cond
     }
 }
 
+pub struct Block {
+    pub address: *mut u8,
+    pub size: usize,
+}
+
+#[inline(always)]
+pub unsafe fn filler(addr: usize, size: usize) {
+    let obj = addr as *mut ObjectHeader;
+    let mut bits = SizeTag::encode(size);
+    bits = VtableTag::update(0, bits);
+    (*obj).bits = bits;
+}

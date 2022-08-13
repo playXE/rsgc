@@ -67,7 +67,18 @@ unsafe impl<T: Trace> Trace for Array<T> {
         }
     }
 }
-unsafe impl<T: Trace + Finalize> Finalize for Array<T> {}
+unsafe impl<T: Trace + Finalize> Finalize for Array<T> {
+    fn finalize(&mut self) {
+        let ptr = self.data.as_mut_ptr();
+        for i in 0..self.length {
+            unsafe {
+                let item = ptr.add(i);
+                (*item).finalize();
+            }
+        }
+    }
+}
+
 impl<T: Trace + Finalize> ManagedObject for Array<T> {}
 
 pub trait IsManaged {

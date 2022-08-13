@@ -1,6 +1,6 @@
 use crate::base::bitfield::BitField;
 use crate::base::constants::*;
-use crate::memory::free_list_new::FreeListElement;
+use crate::memory::free_list::FreeListElement;
 use crate::memory::traits::*;
 use crate::memory::visitor::*;
 use std::marker::PhantomData;
@@ -338,7 +338,7 @@ impl ObjectHeader {
     }
 
     pub fn visit(&mut self, visitor: &mut dyn Visitor) {
-        if self.no_heap_ptrs() /*|| !self.is_initialized()*/ {
+        if self.no_heap_ptrs() {
             return;
         }
         

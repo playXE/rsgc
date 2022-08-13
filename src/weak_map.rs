@@ -2,7 +2,7 @@ use std::{collections::{HashMap, hash_map::RandomState}, hash::BuildHasher};
 
 use crate::{memory::{object_header::ObjectHeader, traits::{Trace, ManagedObject, Finalize, Allocation}, Heap}, Managed};
 
-pub struct WeakMap<V: Trace,S: Trace = RandomState > {
+pub struct WeakMap<V: Trace, S: Trace = RandomState > {
     map: HashMap<*mut ObjectHeader, V,S >
 }
 impl<V: Trace, S: Trace> WeakMap<V, S> {

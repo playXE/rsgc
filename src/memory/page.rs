@@ -1,5 +1,5 @@
 use super::{
-    free_list_new::{Block, FreeList},
+    free_list::{Block, FreeList},
     marker::GCMarker,
     object_header::{ConstVal, ObjectHeader, VTable, VT},
     object_start_bitmap::ObjectStartBitmap,
@@ -7,9 +7,7 @@ use super::{
     visitor::Visitor,
 };
 use crate::base::{
-    constants::{
-        ALLOCATION_GRANULARITY, OBJECT_ALIGNMENT, WORD_SIZE_LOG2, ALLOCATION_MASK,
-    },
+    constants::{ALLOCATION_GRANULARITY, ALLOCATION_MASK, OBJECT_ALIGNMENT, WORD_SIZE_LOG2},
     stack::Stack,
     utils::{
         read_float_from_env, read_string_from_env, read_uint_from_env, round_up, TinyBloomFilter,
@@ -19,8 +17,9 @@ use crate::base::{
 use crate::base::{formatted_size, segmented_vec::SegmentedVec};
 use std::{
     collections::{HashMap, HashSet},
+    intrinsics::unlikely,
     panic::AssertUnwindSafe,
-    ptr::{self, null_mut}, intrinsics::unlikely,
+    ptr::{self, null_mut},
 };
 use std::{
     mem::size_of,
@@ -88,7 +87,7 @@ impl NormalPage {
             Some(mem) => {
                 let bitmap = ObjectStartBitmap::new(mem.start() + Self::OBJECT_START_OFFSET);
                 let ptr = mem.address().cast::<Self>();
-                
+
                 unsafe {
                     ptr.write(Self {
                         base: Page {
@@ -198,9 +197,160 @@ pub enum HeapType {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SweepMode {
+    /// Synchronous sweep right after collection cycle.
     Synhcronous,
+    /// Lazy sweep. Will sweep pages on allocation instead. Might improve latency
     Lazy,
+    /// Concurrent + lazy sweep. Not yet implemented
     Concurrent,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct PageSpaceConfig {
+    /// Collection threshold will grow by `used_bytes_after_gc * heap_growth_factor`.
+    pub heap_growth_factor: f64,
+    /// threshold to avoid that the total heap size grows by a factor
+    /// of heap_growth_factor at every collection: it can only grow at most by
+    /// the following factor from one collection to the next. Used e.g when there is
+    /// a sudden temporary peak in memory usage; this avoids the upper bound grows too fast.
+    pub max_heap_growth_factor: f64,
+    /// Minimal heap size. If remaining live bytes are < MIN_HEAP_SIZE then GC threshold is set to MIN_HEAP_SIZE.
+    pub min_heap_size: usize,
+    /// Max heap size. If next collection threshold is > MAX_HEAP_SIZE then GC threshold is set to MAX_HEAP_SIZE.
+    /// If there is > HEAP_MAX bytes allocated MemoryError is thrown using panic_any()
+    pub max_heap_size: Option<usize>,
+    /// Sweep mode
+    pub sweep_mode: SweepMode,
+}
+
+impl Default for PageSpaceConfig {
+    fn default() -> Self {
+        Self {
+            heap_growth_factor: 1.82,
+            max_heap_growth_factor: 1.4,
+            min_heap_size: 8 * 1024 * 1024,
+            max_heap_size: None,
+            sweep_mode: SweepMode::Synhcronous,
+        }
+    }
+}
+
+impl PageSpaceConfig {
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+
+        config.max_heap_growth_factor = match read_float_from_env("HEAP_GROWTH_FACTOR") {
+            Some(factor) if factor > 1.0 => factor,
+            _ => 1.4,
+        };
+
+        config.heap_growth_factor = match read_float_from_env("HEAP_GROWTH_FACTOR") {
+            Some(factor) if factor > 1.0 => factor,
+            _ => 1.82,
+        };
+
+        config.min_heap_size = match read_uint_from_env("HEAP_MIN_SIZE") {
+            Some(size) => {
+                if size <= PAGE_SIZE {
+                    PAGE_SIZE + 1024
+                } else {
+                    size
+                }
+            }
+            _ => 8 * 1024 * 1024,
+        };
+        config.max_heap_size = match read_uint_from_env("MAX_HEAP_SIZE") {
+            Some(size) => {
+                if size < config.min_heap_size {
+                    None
+                } else {
+                    Some(round_up(size as _, PAGE_SIZE as _) as usize)
+                }
+            }
+            _ => None,
+        };
+
+        config.sweep_mode = match read_string_from_env("SWEEP_MODE") {
+            Some(mode) => match mode.as_str() {
+                "synchronous" => SweepMode::Synhcronous,
+                "lazy" => SweepMode::Lazy,
+                "concurrent" => SweepMode::Lazy,
+                _ => SweepMode::Synhcronous,
+            },
+            _ => SweepMode::Synhcronous,
+        };
+
+        config
+    }
+
+    pub const fn sweep_mode(self) -> SweepMode {
+        self.sweep_mode
+    }
+
+    pub const fn max_heap_size(self) -> Option<usize> {
+        self.max_heap_size
+    }
+
+    pub const fn min_heap_size(self) -> usize {
+        self.min_heap_size
+    }
+
+    pub const fn heap_growth_factor(self) -> f64 {
+        self.heap_growth_factor
+    }
+
+    pub const fn max_heap_growth_factor(self) -> f64 {
+        self.max_heap_growth_factor
+    }
+
+    pub const fn with_sweep_mode(self, mode: SweepMode) -> Self {
+        Self {
+            sweep_mode: mode,
+            ..self
+        }
+    }
+
+    pub fn with_max_heap_size(self, size: Option<usize>) -> Self {
+        Self {
+            max_heap_size: size.map(|size| {
+                if size <= self.min_heap_size {
+                    self.min_heap_size
+                } else {
+                    if size <= PAGE_SIZE {
+                        PAGE_SIZE + 1024
+                    } else {
+                        size
+                    }
+                }
+            }),
+            ..self
+        }
+    }
+
+    pub const fn with_min_heap_size(self, size: usize) -> Self {
+        Self {
+            min_heap_size: if size <= PAGE_SIZE {
+                PAGE_SIZE + 1024
+            } else {
+                size
+            },
+            ..self
+        }
+    }
+
+    pub fn with_heap_growth_factor(self, factor: f64) -> Self {
+        Self {
+            heap_growth_factor: if factor > 1.0 { factor } else { 1.82 },
+            ..self
+        }
+    }
+
+    pub const fn with_max_heap_growth_factor(self, factor: f64) -> Self {
+        Self {
+            max_heap_growth_factor: factor,
+            ..self
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -222,71 +372,61 @@ pub struct PageSpaceController {
 }
 
 impl PageSpaceController {
-    pub fn new() -> Self {
-        let heap_type = match read_uint_from_env("HEAP_TYPE") {
+    pub fn new(config: PageSpaceConfig) -> Self {
+        /*let heap_type = match read_uint_from_env("HEAP_TYPE") {
             Some(1) => HeapType::Large,
             Some(0) => HeapType::Small,
             _ => HeapType::Small,
         };
 
-        // Collection threshold. 
+        // Collection threshold.
         let heap_growth_factor = match read_float_from_env("HEAP_GROWTH_FACTOR") {
             Some(factor) if factor > 1.0 => factor,
             _ => 1.82,
         };
         // threshold to avoid that the total heap size grows by a factor
         // of heap_growth_factor at every collection: it can only grow at most by
-        // the following factor from one collection to the next. Used e.g when there is 
+        // the following factor from one collection to the next. Used e.g when there is
         // a sudden temporary peak in memory usage; this avoids the upper bound grows too fast.
         let max_heap_growth_factor = match read_float_from_env("MAX_HEAP_GROWTH_FACTOR") {
             Some(factor) if factor > 1.0 => factor,
             _ => 1.4,
         };
-        // Minimal heap size. If remaining live bytes are < MIN_HEAP_SIZE then GC threshold is set to MIN_HEAP_SIZE. 
+        // Minimal heap size. If remaining live bytes are < MIN_HEAP_SIZE then GC threshold is set to MIN_HEAP_SIZE.
         let min_heap_size = match read_uint_from_env("MIN_HEAP_SIZE") {
-            Some(size) => if size <= PAGE_SIZE {
-                PAGE_SIZE + 1024 // add some memory so GC does not run recursively if there is only 1 page
-            } else {
-                size
-            },
+            Some(size) => {
+                if size <= PAGE_SIZE {
+                    PAGE_SIZE + 1024 // add some memory so GC does not run recursively if there is only 1 page
+                } else {
+                    size
+                }
+            }
             None => 32 * 1024 * 1024,
         };
         // Max heap size. If next collection threshold is > MAX_HEAP_SIZE then GC threshold is set to MAX_HEAP_SIZE.
         // If there is > HEAP_MAX bytes allocated MemoryError is thrown using panic_any()
-        let max_heap_size = read_uint_from_env("HEAP_MAX")
-            .map(|size| {
-                if size <= PAGE_SIZE {
-                    PAGE_SIZE + 1024
-                } else {
-                    size
-                }
-            });
+        let max_heap_size = read_uint_from_env("HEAP_MAX").map(|size| {
+            if size <= PAGE_SIZE {
+                PAGE_SIZE + 1024
+            } else {
+                size
+            }
+        });*/
 
         let mut this = Self {
             size_after_last_collect: 0,
 
-            heap_growth_factor,
-            heap_type,
-            max_heap_size,
-            heap_growth_factor_max: max_heap_growth_factor,
-            next_collection_initial: min_heap_size,
-            next_collection_threshold: min_heap_size,
-            min_heap_size,
+            heap_growth_factor: config.heap_growth_factor,
+            heap_type: HeapType::Small,
+            max_heap_size: config.max_heap_size,
+            heap_growth_factor_max: config.max_heap_growth_factor,
+            next_collection_initial: config.min_heap_size,
+            next_collection_threshold: config.min_heap_size,
+            min_heap_size: config.min_heap_size,
             bounded_heap_size: None,
             used_bytes: 0,
             gc_count: 0,
-            sweep_mode: match read_string_from_env("SWEEP_MODE") {
-                Some(mode) => {
-                    let mode: &str = &mode.to_lowercase();
-                    match mode {
-                        "synchronous" => SweepMode::Synhcronous,
-                        "lazy" => SweepMode::Lazy,
-                        "concurrent" => SweepMode::Concurrent,
-                        _ => SweepMode::Lazy,
-                    }
-                }
-                None => SweepMode::Synhcronous,
-            },
+            sweep_mode: config.sweep_mode,
         };
 
         this.set_major_threshold_from(0.0);
@@ -402,7 +542,7 @@ unsafe impl Trace for Roots {
     }
 }
 impl Pages {
-    pub fn new() -> Self {
+    pub fn new(config: PageSpaceConfig) -> Self {
         Self {
             current_lab: LinearAllocationBuffer::new(0, 0),
             freelist: FreeList::new(),
@@ -412,7 +552,7 @@ impl Pages {
             large_pages_tail: ptr::null_mut(),
             sweep_large_pages: ptr::null_mut(),
             sweep_pages: ptr::null_mut(),
-            controller: PageSpaceController::new(),
+            controller: PageSpaceController::new(config),
             pages_set: HashSet::with_capacity(8),
             filter: TinyBloomFilter::new(0),
             destructible: SegmentedVec::new(),
@@ -550,7 +690,10 @@ impl Pages {
 
                 if current != start || free_end != end {
                     // only add to freelist if not covering the whole page
-                    self.freelist.add(Block { address: current as _, size: obj_size });
+                    self.freelist.add(Block {
+                        address: current as _,
+                        size: obj_size,
+                    });
                     largest_free_list_entry = largest_free_list_entry.max(obj_size);
                 }
             }
@@ -559,7 +702,7 @@ impl Pages {
         *largest_free = largest_free_list_entry;
         (*page).used_in_bytes = used_in_bytes;
         used_in_bytes
-        /* 
+        /*
         let bitmap = &mut (*page).bitmap;
         let mut largest_new_free_list_entry = 0;
         let mut live_bytes = 0;
@@ -570,11 +713,11 @@ impl Pages {
 
         let end = (*page).object_end();
         bitmap.clear();
-      
+
         while begin != end {
             let header = begin as *mut ObjectHeader;
             let size = (*header).heap_size();
-            if (*header).is_free() {  
+            if (*header).is_free() {
                 begin += size;
                 continue;
             }
@@ -598,7 +741,7 @@ impl Pages {
             begin += size;
             start_of_gap = begin;
             live_bytes += size;
-            
+
         }
 
         if start_of_gap != (*page).object_start() && start_of_gap != (*page).object_end() {
@@ -656,7 +799,6 @@ impl Pages {
     }
     #[inline(always)]
     unsafe fn set_bit(addr: usize) {
-        
         let page = Page::of(addr).cast::<NormalPage>();
         (*page).bitmap.set_bit(addr as _);
     }
@@ -708,7 +850,7 @@ impl Pages {
 
         result
     }*/
-    
+
     unsafe fn replace_lab(&mut self, new_buffer: usize, new_size: usize) {
         let lab = &mut self.current_lab;
 
@@ -720,7 +862,7 @@ impl Pages {
                 size,
             });
         }
-       
+
         lab.set(new_buffer, new_size);
     }
 
@@ -777,7 +919,7 @@ impl Pages {
         let raw = current_lab.allocate(size);
         Self::set_bit(raw);
         debug_assert_eq!(0, raw & ALLOCATION_MASK);
-        
+
         raw
     }
 
@@ -785,10 +927,10 @@ impl Pages {
     unsafe fn try_allocate_internal(&mut self, size: usize) -> usize {
         let current_lab = &mut self.current_lab;
         let lab_size = current_lab.size();
-        
+
         if unlikely(lab_size >= size || size >= LARGE_OBJECT_SIZE_THRESHOLD) {
             let object = self.allocate_object_inline(size);
-            
+
             return object;
         }
         self.out_of_line_allocate(size)
@@ -887,8 +1029,8 @@ impl Pages {
                     return null_mut();
                 }
                 (*page).bitmap.find_header(addr)
-                
-                /* 
+
+                /*
                 if (*page).bitmap.check_bit(addr) {
                     addr as _
                 } else {
@@ -917,7 +1059,9 @@ impl Pages {
                 self.sweep_regular();
             }
         }
-        unsafe { self.replace_lab(0, 0); }
+        unsafe {
+            self.replace_lab(0, 0);
+        }
         let mut marker = GCMarker::new();
         let mut callbacks = std::mem::replace(&mut self.trace_callbacks, HashMap::new());
         let mut roots = Roots {
