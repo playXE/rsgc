@@ -1,5 +1,5 @@
 use super::{
-    free_list::FreeList,
+    free_list_new::{Block, FreeList},
     marker::GCMarker,
     object_header::{ConstVal, ObjectHeader, VTable, VT},
     object_start_bitmap::ObjectStartBitmap,
@@ -7,7 +7,9 @@ use super::{
     visitor::Visitor,
 };
 use crate::base::{
-    constants::{ALLOCATION_GRANULARITY, OBJECT_ALIGNMENT, WORD_SIZE_LOG2},
+    constants::{
+        ALLOCATION_GRANULARITY, OBJECT_ALIGNMENT, WORD_SIZE_LOG2, ALLOCATION_MASK,
+    },
     stack::Stack,
     utils::{
         read_float_from_env, read_string_from_env, read_uint_from_env, round_up, TinyBloomFilter,
@@ -17,7 +19,8 @@ use crate::base::{
 use crate::base::{formatted_size, segmented_vec::SegmentedVec};
 use std::{
     collections::{HashMap, HashSet},
-    ptr::{self, null_mut},
+    panic::AssertUnwindSafe,
+    ptr::{self, null_mut}, intrinsics::unlikely,
 };
 use std::{
     mem::size_of,
@@ -48,6 +51,7 @@ pub struct Page {
 }
 
 impl Page {
+    #[inline(always)]
     pub fn of(addr: usize) -> *mut Self {
         (addr & PAGE_SIZE_MASK) as _
     }
@@ -73,7 +77,7 @@ impl Page {
 pub struct NormalPage {
     base: Page,
     used_in_bytes: usize,
-    bitmap: ObjectStartBitmap,
+    pub(crate) bitmap: ObjectStartBitmap,
 }
 
 impl NormalPage {
@@ -84,6 +88,7 @@ impl NormalPage {
             Some(mem) => {
                 let bitmap = ObjectStartBitmap::new(mem.start() + Self::OBJECT_START_OFFSET);
                 let ptr = mem.address().cast::<Self>();
+                
                 unsafe {
                     ptr.write(Self {
                         base: Page {
@@ -224,21 +229,38 @@ impl PageSpaceController {
             _ => HeapType::Small,
         };
 
+        // Collection threshold. 
         let heap_growth_factor = match read_float_from_env("HEAP_GROWTH_FACTOR") {
             Some(factor) if factor > 1.0 => factor,
             _ => 1.82,
         };
+        // threshold to avoid that the total heap size grows by a factor
+        // of heap_growth_factor at every collection: it can only grow at most by
+        // the following factor from one collection to the next. Used e.g when there is 
+        // a sudden temporary peak in memory usage; this avoids the upper bound grows too fast.
         let max_heap_growth_factor = match read_float_from_env("MAX_HEAP_GROWTH_FACTOR") {
-            Some(factor) if factor > 1.0 => 1.24,
+            Some(factor) if factor > 1.0 => factor,
             _ => 1.4,
         };
-
+        // Minimal heap size. If remaining live bytes are < MIN_HEAP_SIZE then GC threshold is set to MIN_HEAP_SIZE. 
         let min_heap_size = match read_uint_from_env("MIN_HEAP_SIZE") {
-            Some(size) => size,
+            Some(size) => if size <= PAGE_SIZE {
+                PAGE_SIZE + 1024 // add some memory so GC does not run recursively if there is only 1 page
+            } else {
+                size
+            },
             None => 32 * 1024 * 1024,
         };
-
-        let max_heap_size = read_uint_from_env("HEAP_MAX");
+        // Max heap size. If next collection threshold is > MAX_HEAP_SIZE then GC threshold is set to MAX_HEAP_SIZE.
+        // If there is > HEAP_MAX bytes allocated MemoryError is thrown using panic_any()
+        let max_heap_size = read_uint_from_env("HEAP_MAX")
+            .map(|size| {
+                if size <= PAGE_SIZE {
+                    PAGE_SIZE + 1024
+                } else {
+                    size
+                }
+            });
 
         let mut this = Self {
             size_after_last_collect: 0,
@@ -247,8 +269,8 @@ impl PageSpaceController {
             heap_type,
             max_heap_size,
             heap_growth_factor_max: max_heap_growth_factor,
-            next_collection_initial: 0,
-            next_collection_threshold: 0,
+            next_collection_initial: min_heap_size,
+            next_collection_threshold: min_heap_size,
             min_heap_size,
             bounded_heap_size: None,
             used_bytes: 0,
@@ -304,7 +326,7 @@ impl PageSpaceController {
             threshold = threshold_max;
         }
 
-        if threshold < self.min_heap_size as f64 {
+        if (threshold as usize) < self.min_heap_size {
             threshold = self.min_heap_size as f64;
         }
         let bounded;
@@ -326,6 +348,7 @@ impl PageSpaceController {
 }
 
 pub struct Pages {
+    current_lab: LinearAllocationBuffer,
     freelist: FreeList,
     controller: PageSpaceController,
     pages: *mut NormalPage,
@@ -381,6 +404,7 @@ unsafe impl Trace for Roots {
 impl Pages {
     pub fn new() -> Self {
         Self {
+            current_lab: LinearAllocationBuffer::new(0, 0),
             freelist: FreeList::new(),
             pages: ptr::null_mut(),
             pages_tail: ptr::null_mut(),
@@ -494,8 +518,8 @@ impl Pages {
     unsafe fn sweep_page(
         &mut self,
         page: *mut NormalPage,
-        free: &mut usize,
-        needs: usize,
+        largest_free: &mut usize,
+        _needs: usize,
     ) -> usize {
         let end = (*page).object_end();
         let mut used_in_bytes = 0;
@@ -503,7 +527,7 @@ impl Pages {
         let mut current = start;
 
         let bitmap = &mut (*page).bitmap;
-
+        let mut largest_free_list_entry = 0;
         bitmap.clear();
 
         while current < end {
@@ -514,7 +538,6 @@ impl Pages {
                 used_in_bytes += obj_size;
             } else {
                 let mut free_end = current + obj_size;
-
                 while free_end < end {
                     let next_obj = free_end as *mut ObjectHeader;
                     if (*next_obj).is_visited() {
@@ -527,38 +550,83 @@ impl Pages {
 
                 if current != start || free_end != end {
                     // only add to freelist if not covering the whole page
-                    self.freelist.free_locked(current, obj_size);
-                    *free += obj_size;
-                    if obj_size >= needs {
-                        (*page).used_in_bytes = used_in_bytes;
-
-                        return used_in_bytes;
-                    }
+                    self.freelist.add(Block { address: current as _, size: obj_size });
+                    largest_free_list_entry = largest_free_list_entry.max(obj_size);
                 }
             }
             current += obj_size;
         }
-
+        *largest_free = largest_free_list_entry;
         (*page).used_in_bytes = used_in_bytes;
         used_in_bytes
+        /* 
+        let bitmap = &mut (*page).bitmap;
+        let mut largest_new_free_list_entry = 0;
+        let mut live_bytes = 0;
+
+        let mut start_of_gap = (*page).object_start();
+
+        let mut begin = start_of_gap;
+
+        let end = (*page).object_end();
+        bitmap.clear();
+      
+        while begin != end {
+            let header = begin as *mut ObjectHeader;
+            let size = (*header).heap_size();
+            if (*header).is_free() {  
+                begin += size;
+                continue;
+            }
+
+            if !(*header).clear_visited() {
+                begin += size;
+                continue;
+            }
+            let header_address = header as usize;
+            if start_of_gap != header_address {
+                let new_free_list_entry_size = header_address - start_of_gap;
+                self.freelist.add(Block {
+                    address: start_of_gap as _,
+                    size: new_free_list_entry_size,
+                });
+
+                largest_new_free_list_entry =
+                    largest_new_free_list_entry.max(new_free_list_entry_size);
+            }
+            bitmap.set_bit(begin);
+            begin += size;
+            start_of_gap = begin;
+            live_bytes += size;
+            
+        }
+
+        if start_of_gap != (*page).object_start() && start_of_gap != (*page).object_end() {
+            self.freelist.add(Block {
+                address: start_of_gap as _,
+                size: (*page).object_end() - start_of_gap,
+            });
+        }
+
+        *largest_free = largest_new_free_list_entry;
+
+        (*page).used_in_bytes += live_bytes;
+
+        live_bytes*/
     }
     /// Sweeps normal pages until `size` bytes is available in freelist
-    unsafe fn lazy_sweep(&mut self, size: usize) -> usize {
+    unsafe fn lazy_sweep(&mut self, size: usize) -> bool {
         while !self.sweep_pages.is_null() {
             let next = (*self.sweep_pages).next;
+            let mut largest_free_list_entry = 0;
+            let used_in_bytes =
+                self.sweep_page(self.sweep_pages, &mut largest_free_list_entry, size);
 
-            let used_in_bytes = self.sweep_page(self.sweep_pages, &mut 0, size);
-
-            // it is fine to invoke try_allocate here as `lazy_sweep` is invoked only when free-list does not contain entries for `size` bytes
-            let result = self.freelist.try_allocate(size, false);
-
-            if result != 0 {
-                (*self.sweep_pages).bitmap.set_bit(result);
+            if largest_free_list_entry >= size {
                 let page = self.sweep_pages;
                 self.sweep_pages = next.cast();
                 self.add_page(page);
-
-                return result;
+                return true;
             } else if used_in_bytes == 0 {
                 self.controller.used_bytes -= PAGE_SIZE;
                 free_page(self.sweep_pages.cast());
@@ -569,7 +637,7 @@ impl Pages {
             self.sweep_pages = next.cast();
         }
 
-        0
+        false
     }
 
     unsafe fn try_allocate_in_fresh_large_page(&mut self, size: usize) -> usize {
@@ -588,45 +656,46 @@ impl Pages {
     }
     #[inline(always)]
     unsafe fn set_bit(addr: usize) {
+        
         let page = Page::of(addr).cast::<NormalPage>();
         (*page).bitmap.set_bit(addr as _);
     }
-
-    unsafe fn try_allocate_in_fresh_page(&mut self, size: usize) -> usize {
+    /*
+    unsafe fn try_allocate_in_fresh_page(&mut self, size: usize) -> Block {
         let result = self.lazy_sweep(size);
-        if result != 0 {
+        if !result.address.is_null() {
             return result;
         }
         let result;
 
         if self.controller.used_bytes + PAGE_SIZE >= self.controller.next_collection_threshold {
-            return 0; // will trigger GC
+            return Block {
+                address: null_mut(),
+                size: 0
+            }; // will trigger GC
         }
 
         let page = self.allocate_page(true);
 
         if page.is_null() {
-            return 0;
+            return Block {
+                address: null_mut(),
+                size: 0
+            };
         }
         self.controller.used_bytes += PAGE_SIZE;
 
         result = (*page).object_start();
         (*page).bitmap.set_bit(result);
 
-        let free_start = result + size;
-        let free_size = (*page).object_end() as isize - free_start as isize;
+        Block { address: result as _, size: (*page).object_end() - (*page).object_start() }
+    }*/
 
-        if free_size > 0 {
-            self.freelist.free_locked(free_start, free_size as _);
-        }
-        result
-    }
-
-    unsafe fn try_allocate_internal(&mut self, size: usize) -> usize {
+    /*unsafe fn try_allocate_internal(&mut self, size: usize) -> usize {
         let mut result;
 
         if size <= LARGE_OBJECT_SIZE_THRESHOLD {
-            result = self.freelist.try_allocate_locked(size, false);
+            result = self.freelist.try_allocate_inline(size);
 
             if result == 0 {
                 result = self.try_allocate_in_fresh_page(size);
@@ -638,6 +707,91 @@ impl Pages {
         }
 
         result
+    }*/
+    
+    unsafe fn replace_lab(&mut self, new_buffer: usize, new_size: usize) {
+        let lab = &mut self.current_lab;
+
+        if lab.size() != 0 {
+            let start = lab.start();
+            let size = lab.size();
+            self.freelist.add(Block {
+                address: start as _,
+                size,
+            });
+        }
+       
+        lab.set(new_buffer, new_size);
+    }
+
+    unsafe fn out_of_line_allocate(&mut self, size: usize) -> usize {
+        if size >= LARGE_OBJECT_SIZE_THRESHOLD {
+            return self.try_allocate_in_fresh_large_page(size);
+        }
+
+        let request_size = size;
+
+        if !self.refill_linear_allocation_buffer(request_size) {
+            return 0; // reached GC threshold
+        }
+        self.allocate_object_inline(size)
+    }
+
+    unsafe fn refill_linear_allocation_buffer(&mut self, size: usize) -> bool {
+        if self.refill_linear_allocation_buffer_from_free_list(size) {
+            return true;
+        }
+
+        if self.lazy_sweep(size) {
+            if self.refill_linear_allocation_buffer_from_free_list(size) {
+                return true;
+            }
+        }
+        if self.controller.used_bytes + PAGE_SIZE >= self.controller.next_collection_threshold {
+            return false;
+        }
+        let new_page = self.allocate_page(true);
+        self.controller.used_bytes += PAGE_SIZE;
+        self.replace_lab(
+            (*new_page).object_start(),
+            (*new_page).object_end() - (*new_page).object_start(),
+        );
+        true
+    }
+
+    unsafe fn refill_linear_allocation_buffer_from_free_list(&mut self, size: usize) -> bool {
+        let entry = self.freelist.allocate(size);
+        if entry.address.is_null() {
+            return false;
+        }
+
+        self.replace_lab(entry.address as _, entry.size);
+        true
+    }
+    #[inline]
+    unsafe fn allocate_object_inline(&mut self, size: usize) -> usize {
+        let current_lab = &mut self.current_lab;
+        if current_lab.size() < size {
+            return self.out_of_line_allocate(size);
+        }
+        let raw = current_lab.allocate(size);
+        Self::set_bit(raw);
+        debug_assert_eq!(0, raw & ALLOCATION_MASK);
+        
+        raw
+    }
+
+    #[inline]
+    unsafe fn try_allocate_internal(&mut self, size: usize) -> usize {
+        let current_lab = &mut self.current_lab;
+        let lab_size = current_lab.size();
+        
+        if unlikely(lab_size >= size || size >= LARGE_OBJECT_SIZE_THRESHOLD) {
+            let object = self.allocate_object_inline(size);
+            
+            return object;
+        }
+        self.out_of_line_allocate(size)
     }
 
     pub unsafe fn try_allocate_raw(&mut self, size: usize) -> usize {
@@ -674,7 +828,7 @@ impl Pages {
             self.pages_tail = null_mut();
             self.pages = null_mut();
             self.controller.used_bytes = 0;
-            self.freelist.reset();
+            self.freelist.clear();
             // large pages are always sweeped synchronously
             {
                 // todo: add best-fit free list for large pages?
@@ -723,7 +877,6 @@ impl Pages {
         }
 
         unsafe {
-          
             if (*page).large {
                 // if page is large we simply return its object_start()
                 (*page.cast::<LargePage>()).object_start() as *mut ObjectHeader
@@ -733,9 +886,14 @@ impl Pages {
                 if addr < (*page).object_start() || addr >= (*page).object_end() {
                     return null_mut();
                 }
-                let header = (*page).bitmap.find_header(addr);
-
-                header
+                (*page).bitmap.find_header(addr)
+                
+                /* 
+                if (*page).bitmap.check_bit(addr) {
+                    addr as _
+                } else {
+                    null_mut()
+                }*/
             }
         }
     }
@@ -759,7 +917,7 @@ impl Pages {
                 self.sweep_regular();
             }
         }
-
+        unsafe { self.replace_lab(0, 0); }
         let mut marker = GCMarker::new();
         let mut callbacks = std::mem::replace(&mut self.trace_callbacks, HashMap::new());
         let mut roots = Roots {
@@ -771,7 +929,7 @@ impl Pages {
         let bytes = marker.marked_bytes();
         let time_micros = marker.marked_micros();
         let words_per_micro = (bytes / size_of::<usize>()) as u64 / time_micros as u64;
-        self.run_finalizers = roots.finalizable;
+        self.run_finalizers.append(&mut roots.finalizable);
         self.trace_callbacks = callbacks;
         self.sweep();
 
@@ -811,7 +969,8 @@ impl Pages {
         }
         self.controller.gc_count += 1;
     }
-
+    #[inline(never)]
+    #[cold]
     unsafe fn collect_and_try_allocate(&mut self, size: usize) -> usize {
         self.collect();
         let result = self.try_allocate_internal(size);
@@ -820,6 +979,19 @@ impl Pages {
         }
 
         result
+    }
+    #[inline(never)]
+    #[cold]
+    fn post_malloc<A: 'static + Allocation>(&mut self, obj: *mut ObjectHeader) {
+        if A::LIGHT_FINALIZER && A::FINALIZE {
+            self.destructible.push(obj);
+        } else if A::FINALIZE && !A::LIGHT_FINALIZER {
+            self.finalizable.push(obj);
+        }
+
+        if A::HAS_WEAKPTR {
+            self.weak_refs.push(obj);
+        }
     }
 
     pub fn malloc_fixedsize<A: 'static + Allocation>(&mut self) -> *mut ObjectHeader {
@@ -840,13 +1012,8 @@ impl Pages {
             if !A::HAS_GCPTRS {
                 (*result).set_no_heap_ptrs();
             }
-            if A::LIGHT_FINALIZER && A::FINALIZE {
-                self.destructible.push(result);
-            } else if A::FINALIZE && !A::LIGHT_FINALIZER {
-                self.finalizable.push(result);
-            }
-            if A::HAS_WEAKPTR {
-                self.weak_refs.push(result);
+            if A::LIGHT_FINALIZER | A::FINALIZE | A::HAS_WEAKPTR {
+                self.post_malloc::<A>(result);
             }
 
             result
@@ -859,7 +1026,7 @@ impl Pages {
 
         unsafe {
             let mut result = self.try_allocate_internal(size);
-            if result == 0 {
+            if unlikely(result == 0) {
                 result = self.collect_and_try_allocate(size);
             }
             let result = result as *mut ObjectHeader;
@@ -874,14 +1041,8 @@ impl Pages {
                 .cast::<usize>()
                 .write(length);
 
-            if A::LIGHT_FINALIZER && A::FINALIZE {
-                self.destructible.push(result);
-            } else if A::FINALIZE && !A::LIGHT_FINALIZER {
-                self.finalizable.push(result);
-            }
-
-            if A::HAS_WEAKPTR {
-                self.weak_refs.push(result);
+            if A::LIGHT_FINALIZER | A::FINALIZE | A::HAS_WEAKPTR {
+                self.post_malloc::<A>(result);
             }
             result
         }
@@ -889,3 +1050,65 @@ impl Pages {
 }
 
 pub struct MemoryError;
+
+unsafe fn free_pages(pages: *mut Page) {
+    let mut p = pages;
+    while !p.is_null() {
+        let next = (*p).next;
+        free_page(p);
+        p = next;
+    }
+}
+
+impl Drop for Pages {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(true) = read_uint_from_env("COLLECT_ON_DROP").map(|val| val != 0) {
+                let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    self.collect();
+                }));
+            }
+            while let Some(obj) = self.destructible.pop() {
+                let _ = std::panic::catch_unwind(move || match (*obj).vtable().finalize {
+                    Some(cb) => cb(obj.add(1).cast()),
+                    None => (),
+                });
+            }
+            free_pages(self.pages.cast());
+            free_pages(self.sweep_pages.cast());
+            free_pages(self.large_pages.cast());
+        }
+    }
+}
+
+pub struct LinearAllocationBuffer {
+    start: usize,
+    size: usize,
+}
+
+impl LinearAllocationBuffer {
+    #[inline(always)]
+    pub fn allocate(&mut self, size: usize) -> usize {
+        let result = self.start;
+        self.start += size;
+        self.size -= size;
+        result
+    }
+    #[inline(always)]
+    pub fn set(&mut self, start: usize, size: usize) {
+        self.start = start;
+        self.size = size;
+    }
+    #[inline(always)]
+    pub const fn size(&self) -> usize {
+        self.size
+    }
+    #[inline(always)]
+    pub const fn start(&self) -> usize {
+        self.start
+    }
+
+    pub const fn new(start: usize, size: usize) -> Self {
+        LinearAllocationBuffer { start, size }
+    }
+}

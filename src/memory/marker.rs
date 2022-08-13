@@ -1,4 +1,4 @@
-use std::{intrinsics::unlikely, ptr::null_mut, sync::atomic::AtomicUsize};
+use std::{ptr::null_mut, sync::atomic::AtomicUsize};
 
 use crate::base::segmented_vec::SegmentedVec;
 
@@ -21,10 +21,11 @@ struct LocalMarker {
 }
 
 impl LocalMarker {
+    #[inline(never)]
     unsafe fn drain_marking_stack(&mut self) {
         while self.process_marking_stack(isize::MAX) {}
     }
-
+    #[inline(never)]
     unsafe fn process_marking_stack(&mut self, mut remaining_budget: isize) -> bool {
         let mut raw_obj = self.marking_worklist.pop();
         while !raw_obj.is_null() {
@@ -44,10 +45,10 @@ impl LocalMarker {
         if (*raw_obj).is_visited_unsynchronized() {
             return;
         }
-
-        if (*raw_obj).try_mark() {
-            self.marking_worklist.push(raw_obj);
-        }
+     
+        (*raw_obj).set_visited();
+        self.marking_worklist.push(raw_obj);
+        
     }
 
     unsafe fn process_weak_refs(&mut self) {
@@ -63,7 +64,7 @@ impl LocalMarker {
                     let weak_slot = data.add(offset).cast::<*mut ObjectHeader>();
                     let weak_ref = *weak_slot;
                     if !(*weak_ref).is_visited() {
-                        println!("dead slot {:p}", weak_ref);
+                    
                         weak_slot.write(null_mut());
                     }
                 }
@@ -126,7 +127,7 @@ impl LocalMarker {
     }
 
     unsafe fn recursively_bump_finalization_state_from_1_to_2(&mut self, obj: *mut ObjectHeader) {
-        self.marking_worklist.push(obj);
+        self.mark_object(obj);
         self.drain_marking_stack();
     }
 
@@ -161,11 +162,12 @@ impl LocalMarker {
         }
 
         while let Some(obj) = (*self.pages).finalizable.pop() {
-            if (*obj).is_visited() || !(*obj).is_initialized() {
-                if unlikely(!(*obj).is_initialized()) {
+            if (*obj).is_visited() {
+               /*if unlikely(!(*obj).is_initialized()) {
+                    println!("keep alive {:p}", obj);
                     self.mark_object(obj);
                     self.drain_marking_stack();
-                }
+                }*/
                 new_with_finalizers.push(obj);
                 continue;
             }
@@ -185,10 +187,11 @@ impl LocalMarker {
 
                     (*y).visit(&mut visitor);
                 } else if state == 2 {
+
                     self.recursively_bump_finalization_state_from_2_to_3(y);
                 }
             }
-
+          
             self.recursively_bump_finalization_state_from_1_to_2(obj);
         }
 
@@ -199,6 +202,7 @@ impl LocalMarker {
                 (*self.pages).run_finalizers.push(x);
                 self.recursively_bump_finalization_state_from_2_to_3(x);
             } else {
+             
                 new_with_finalizers.push(x);
             }
         }
@@ -224,11 +228,11 @@ impl LocalMarker {
     }
     /// Walk all destructible objects and keep them alive if they are still not initialized. We cannot destroy non initialized objects.
     unsafe fn check_uninitialized_dtors(&mut self) {
-        for object in (*self.pages).destructible.iter().copied() {
-            if !(*object).is_initialized() && !(*object).no_heap_ptrs() {
+        /*for object in (*self.pages).destructible.iter().copied() {
+            /*if !(*object).is_initialized() && !(*object).no_heap_ptrs() {
                 self.mark_object(object);
-            }
-        }
+            }*/
+        }*/
     }
 }
 
@@ -241,6 +245,7 @@ impl Visitor for LocalMarker {
 
             let header = (*self.pages).try_pointer_conservative(addr as _);
             if !header.is_null() {
+                
                 self.visit_pointer(header);
             }
             current = current.add(1);

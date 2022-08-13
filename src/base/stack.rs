@@ -3,14 +3,6 @@ use std::{
     ptr::{null, DynMetadata},
 };
 
-extern "C" {
-    #[link_name = "llvm.frameaddress"]
-    fn builtin_frame_address(level: i32) -> *const u8;
-}
-
-pub fn get_current_stack_position() -> *const u8 {
-    unsafe { builtin_frame_address(0) }
-}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -28,7 +20,7 @@ impl Stack {
         }
     }
     pub fn is_on_stack(&self, addr: *const u8) -> bool {
-        get_current_stack_position() <= addr && addr <= self.stack_start
+       approximate_stack_pointer().cast::<u8>() <= addr && addr <= self.stack_start
     }
     #[inline(never)]
     pub fn iterate_pointers(&self, visitor: &mut dyn StackVisitor) {

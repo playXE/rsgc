@@ -41,7 +41,7 @@ impl<const SIZE: usize, const POSITION: usize, const SIGN_EXTEND: bool>
         }
     }
     pub fn encode(value: u64) -> u64 {
-        assert!(Self::is_valid(value));
+        debug_assert!(Self::is_valid(value));
         (value & Self::mask()) << POSITION as u64
     }
 

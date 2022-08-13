@@ -1,6 +1,6 @@
 use crate::base::bitfield::BitField;
 use crate::base::constants::*;
-use crate::memory::free_list::FreeListElement;
+use crate::memory::free_list_new::FreeListElement;
 use crate::memory::traits::*;
 use crate::memory::visitor::*;
 use std::marker::PhantomData;
@@ -40,10 +40,19 @@ pub struct VTable {
     pub light_finalizer: bool,
     pub type_id: TypeId,
     pub type_name: &'static str,
+    /// Offsets of weak ref fields
     pub weak_refs: &'static [usize],
-
     pub(crate) weak_map_process: Option<fn(*mut (), &mut dyn FnMut(*mut ObjectHeader) -> *mut ObjectHeader)>,
 }
+
+
+pub struct VarSize {
+    pub itemsize: usize,
+    pub offset_of_length: usize,
+    pub offset_of_variable_part: usize,
+    pub field_might_be_object: fn(at: *mut u8) -> *mut ObjectHeader,
+}
+
 
 /*
 quasiconst! {
@@ -102,13 +111,6 @@ impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
     };
 }
 
-pub struct VarSize {
-    pub itemsize: usize,
-    pub offset_of_length: usize,
-    pub offset_of_variable_part: usize,
-    pub field_might_be_object: fn(at: *mut u8) -> *mut ObjectHeader,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AccessMode {
     Atomic,
@@ -119,12 +121,12 @@ pub const NO_GC_PTRS: usize = 0;
 pub const PINNED: usize = 1;
 pub const VISITED: usize = 2;
 pub const HAS_SHADOW: usize = 3;
-pub const FINALIZATION_ORDERING: usize = 4;
-pub const INITIALIZED_TAG: usize = 5;
+pub const FINALIZATION_ORDERING: usize = 3;
+pub const INITIALIZED_TAG: usize = 4;
 pub const SHADOW_INITIALIZED: usize = 6;
 pub const SHADOW_INITIALIZED_SIZE: usize = 1;
 
-pub const SIZE_TAG_POS: usize = SHADOW_INITIALIZED + SHADOW_INITIALIZED_SIZE;
+pub const SIZE_TAG_POS: usize = INITIALIZED_TAG + 1;
 pub const SIZE_TAG_SIZE: usize = 8;
 pub const VTABLE_TAG_POS: usize = SIZE_TAG_POS + SIZE_TAG_SIZE;
 pub const VTABLE_TAG_SIZE: usize = 48;
@@ -137,25 +139,27 @@ impl SizeTag {
     pub const MAX_SIZE_TAG_IN_UNITS_OF_ALIGNMENT: u64 = ((1 << SIZE_TAG_SIZE as u64) - 1);
     pub const MAX_SIZE_TAG: u64 =
         Self::MAX_SIZE_TAG_IN_UNITS_OF_ALIGNMENT * OBJECT_ALIGNMENT as u64;
-
+    #[inline]
     pub fn decode(tag: u64) -> usize {
         Self::tag_value_to_size(SizeBits::decode(tag))
     }
-
+    #[inline]
     pub fn encode(size: usize) -> u64 {
         SizeBits::encode(Self::size_to_tag_value(size))
     }
+    #[inline]
     pub fn update(tag: u64, size: usize) -> u64 {
         SizeBits::update(Self::size_to_tag_value(size), tag)
     }
+    #[inline]
     fn tag_value_to_size(tag: u64) -> usize {
         (tag as usize) << OBJECT_ALIGNMENT_LOG2
     }
-
+    #[inline]
     pub fn size_fits(size: usize) -> bool {
         size <= Self::MAX_SIZE_TAG as usize
     }
-
+    #[inline]
     fn size_to_tag_value(size: usize) -> u64 {
         if !Self::size_fits(size) {
             0
@@ -172,6 +176,8 @@ pub type FinalizationOrderingTag = BitField<1, FINALIZATION_ORDERING, false>;
 pub type InitializedTag = BitField<1, INITIALIZED_TAG, false>;
 use crate::base::bitfield::ToAtomicBitField;
 
+
+
 pub struct ObjectHeader {
     pub bits: u64,
 }
@@ -184,39 +190,48 @@ impl ObjectHeader {
     pub fn set_initialized(&mut self) {
         self.bits = InitializedTag::update(1, self.bits);
     }
-
+    #[inline]
     pub fn no_heap_ptrs(&self) -> bool {
         NoHeapPtrsTag::decode(self.bits) != 0
     }
-
+    #[inline]
     pub fn set_no_heap_ptrs(&mut self) {
         self.bits = NoHeapPtrsTag::update(1, self.bits);
     }
-
+    #[inline]
     pub fn finalization_ordering(&self) -> bool {
         FinalizationOrderingTag::decode(self.bits) != 0
     }
-
+    #[inline]
     pub fn set_finalization_ordering(&mut self, value: bool) {
         self.bits = FinalizationOrderingTag::update(value as u64, self.bits);
     }
-
+    #[inline]
     pub fn is_visited(&self) -> bool {
-        VisitedTag::make_atomic(&self.bits).read(std::sync::atomic::Ordering::Relaxed) != 0
+        VisitedTag::decode(self.bits) != 0
+        //VisitedTag::make_atomic(&self.bits).read(std::sync::atomic::Ordering::Relaxed) != 0
     }
-
+    #[inline]
     pub fn is_visited_unsynchronized(&self) -> bool {
         VisitedTag::decode(self.bits) != 0
+    }   
+    #[inline]
+    pub fn set_visited(&mut self) {
+        self.bits = VisitedTag::update(1, self.bits);
+        //VisitedTag::make_atomic(&self.bits).update(1);
+    }   
+    #[inline]
+    pub fn clear_visited(&mut self) -> bool {
+        if self.is_visited() {
+            self.bits = VisitedTag::update(0, self.bits);
+            return true;
+        } else {
+            self.bits = VisitedTag::update(0, self.bits);
+            false 
+        }
+       
     }
-
-    pub fn set_visited(&self) {
-        VisitedTag::make_atomic(&self.bits).update(1);
-    }
-
-    pub fn clear_visited(&self) -> bool {
-        VisitedTag::make_atomic(&self.bits).try_clear()
-    }
-
+    #[inline]
     pub fn clear_visited_unsync(&mut self) {
         self.bits = VisitedTag::update(0, self.bits);
     }
@@ -245,7 +260,7 @@ impl ObjectHeader {
         let length = *(data as *const usize);
         length
     }
-
+    #[inline]
     pub unsafe fn array_itemsize(&self) -> usize {
         let vt = self.vtable();
         assert!(vt.is_varsize);
@@ -266,13 +281,19 @@ impl ObjectHeader {
         let addr = self as *const Self as usize;
         (addr & OBJECT_ALIGNMENT_MASK) == OLD_OBJECT_ALIGNMENT_OFFSET
     }
-
+    #[inline]
     pub fn vtable(&self) -> &'static VTable {
         unsafe {
             let value = VtableTag::decode(self.bits);
             std::mem::transmute::<usize, &'static VTable>(value as usize)
         }
     }
+
+    #[inline]
+    pub fn is_free(&self) -> bool {
+        VtableTag::decode(self.bits) == 0
+    }
+    #[inline]
     pub fn set_heap_size(&mut self, size: usize) {
         self.bits = SizeTag::update(self.bits, size);
     }
@@ -286,7 +307,7 @@ impl ObjectHeader {
 
         unsafe { self.heap_size_from_vtable(tags) }
     }
-
+    #[inline]
     pub fn set_vtable(&mut self, vt: usize) {
         self.bits = VtableTag::update(vt as _, self.bits);
     }
@@ -307,19 +328,20 @@ impl ObjectHeader {
         }
         result + size_of::<Self>()
     }
-
+    #[inline]
     pub fn data(&self) -> *const u8 {
         (self as *const Self as usize + size_of::<Self>()) as _
     }
-
+    #[inline]
     pub fn data_mut(&mut self) -> *mut u8 {
         (self as *mut Self as usize + size_of::<Self>()) as _
     }
 
     pub fn visit(&mut self, visitor: &mut dyn Visitor) {
-        if self.no_heap_ptrs() || !self.is_initialized() {
+        if self.no_heap_ptrs() /*|| !self.is_initialized()*/ {
             return;
         }
+        
         let vt = self.vtable();
         (vt.trace)(self.data() as _, visitor);
     }
@@ -329,7 +351,7 @@ impl ObjectHeader {
 
         self.heap_size()
     }
-
+    #[inline]
     pub fn contains(&self, addr: usize) -> bool {
         let this_size = self.heap_size();
         let this_addr = self as *const Self as usize;

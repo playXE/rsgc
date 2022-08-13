@@ -1,10 +1,13 @@
+#[inline]
 pub const fn round_up(x: isize, n: isize) -> isize {
     round_down(x + n - 1, n)
 }
+
+#[inline]
 pub const fn round_down(x: isize, n: isize) -> isize {
     x & -n
 }
-
+#[inline]
 const fn next_bits(x: usize) -> usize {
     if x == 1 {
         1
@@ -12,7 +15,7 @@ const fn next_bits(x: usize) -> usize {
         x / 2
     }
 }
-
+#[inline]
 pub const fn count_leading_zeros_16_(bits: usize, value: u16) -> u16 {
     if bits == 1 {
         return value ^ 1;
@@ -25,7 +28,7 @@ pub const fn count_leading_zeros_16_(bits: usize, value: u16) -> u16 {
 
     count_leading_zeros_16_(next_bits(bits), next_value) + add
 }
-
+#[inline]
 pub const fn count_leading_zeros_8_(bits: usize, value: u8) -> u8 {
     if bits == 1 {
         return value ^ 1;
@@ -38,7 +41,7 @@ pub const fn count_leading_zeros_8_(bits: usize, value: u8) -> u8 {
 
     count_leading_zeros_8_(next_bits(bits), next_value) + add
 }
-
+#[inline]
 pub const fn count_leading_zeros_32_(bits: usize, value: u32) -> u32 {
     if bits == 1 {
         return value ^ 1;
@@ -51,7 +54,7 @@ pub const fn count_leading_zeros_32_(bits: usize, value: u32) -> u32 {
 
     count_leading_zeros_32_(next_bits(bits), next_value) + add
 }
-
+#[inline]
 pub const fn count_leading_zeros_64_(bits: usize, value: u64) -> u64 {
     if bits == 1 {
         return value ^ 1;
@@ -64,23 +67,23 @@ pub const fn count_leading_zeros_64_(bits: usize, value: u64) -> u64 {
 
     count_leading_zeros_64_(next_bits(bits), next_value) + add
 }
-
+#[inline]
 pub const fn count_leading_zeros_32(value: u32) -> u32 {
     count_leading_zeros_32_(32, value)
 }
-
+#[inline]
 pub const fn count_leading_zeros_64(value: u64) -> u64 {
     count_leading_zeros_64_(64, value)
 }
-
+#[inline]
 pub const fn count_leading_zeros_16(value: u16) -> u16 {
     count_leading_zeros_16_(16, value)
 }
-
+#[inline]
 pub const fn count_leading_zeros_8(value: u8) -> u8 {
     count_leading_zeros_8_(8, value)
 }
-
+#[inline]
 pub const fn count_leading_zeros(value: usize) -> usize {
     #[cfg(target_pointer_width = "64")]
     {
@@ -179,4 +182,30 @@ impl TinyBloomFilter {
     pub fn bits(&self) -> usize {
         self.bits
     }
+}
+
+
+
+pub const fn round_down_to_power_of_two32(value: u32) -> u32 {
+    if value > 0x8000000 {
+        return 0x8000000;
+    }
+    let mut result = round_up_to_power_of_two32(value);
+    if result > value {
+        result >>= 1;
+    }
+
+    result
+}
+
+pub const fn round_up_to_power_of_two32(mut value: u32) -> u32 {
+    if value != 0 {
+        value = value.wrapping_sub(1);
+    }
+
+    1 << (32 - value.leading_zeros())
+}
+
+pub const fn which_power_of_two32(value: u32) -> u32 {
+    value.trailing_zeros()
 }

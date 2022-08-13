@@ -140,8 +140,8 @@ impl FreeList {
         self.free_lists[index] = next;
 
         result
-    }
-
+    }   
+    #[inline]
     pub const fn index_for_size(size: usize) -> usize {
         let index = size >> OBJECT_ALIGNMENT_LOG2;
         if index >= NUM_LISTS {
@@ -212,7 +212,19 @@ impl FreeList {
         if is_protected {
             // TBD
         }
+    }  
+    #[inline]
+    pub unsafe fn try_allocate_inline(&mut self, size: usize) -> usize {
+        let index = Self::index_for_size(size);
+        if index != NUM_LISTS && self.free_map.test(index as _) {
+            let element = self.dequeue_element(index);
+
+            return element as usize;
+        }
+
+        self.try_allocate_locked(size, false)
     }
+
     pub unsafe fn try_allocate_locked(&mut self, size: usize, is_protected: bool) -> usize {
         let index = Self::index_for_size(size);
         if index != NUM_LISTS && self.free_map.test(index as _) {
@@ -272,6 +284,10 @@ impl FreeList {
     }
 
     pub unsafe fn free_locked(&mut self, address: usize, size: usize) {
+        /*static OCCUR: AtomicUsize = AtomicUsize::new(0);
+        if format!("{:x}",address).ends_with("450") && OCCUR.fetch_add(1, Ordering::Relaxed) == 1{
+            panic!();
+        }*/
         let element = FreeListElement::as_element(address, size);
         let index = Self::index_for_size(size);
         self.enqueue_element(element, index);
@@ -356,3 +372,4 @@ impl FreeList {
         self.free_lists[index] = element;
     }
 }
+

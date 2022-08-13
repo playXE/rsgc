@@ -1,4 +1,6 @@
 use std::mem::size_of;
+
+use crate::memory::object_header::ObjectHeader;
 pub struct ObjectAlignment<const WORD_SIZE: usize, const WORD_SIZE_LOG2: usize>;
 
 impl<const WORD_SIZE: usize, const WORD_SIZE_LOG2: usize>
@@ -70,6 +72,7 @@ pub const ALLOCATION_GRANULARITY: usize = 16;
 pub const ALLOCATION_GRANULARITY: usize = 8;
 
 pub const ALLOCATION_MASK: usize = ALLOCATION_GRANULARITY - 1;
+pub const PADDING_SIZE: usize = ALLOCATION_GRANULARITY - size_of::<ObjectHeader>();
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_arch="aarch64", target_os="macos"))] {

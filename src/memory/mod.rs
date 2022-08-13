@@ -10,7 +10,7 @@ use std::{
 use crate::base::formatted_size;
 
 use self::{
-    object_header::ObjectHeader,
+    object_header::{ObjectHeader},
     page::Pages,
     traits::{Allocation, Finalize, ManagedObject, Trace},
 };
@@ -23,7 +23,9 @@ pub mod page;
 pub mod page_memory;
 pub mod pointer_block;
 pub mod traits;
+pub mod free_list_new;
 pub mod visitor;
+pub mod immix;
 
 pub struct Heap {
     pages: Pages,
@@ -48,12 +50,11 @@ impl Heap {
     pub fn remove_persistent_root(&mut self, key: u32) -> Option<Box<dyn Trace>> {
         self.pages.trace_callbacks.remove(&key)
     }
-
+    #[cfg_attr(test, inline(never))]
     pub fn manage<T: 'static + Allocation + ManagedObject>(&mut self, value: T) -> Managed<T> {
         let header = self.pages.malloc_fixedsize::<T>();
         unsafe {
             (*header).data_mut().cast::<T>().write(value);
-            (*header).set_initialized();
             Managed {
                 header: NonNull::new_unchecked(header),
                 marker: PhantomData,
@@ -89,6 +90,8 @@ impl Heap {
         self.pages.weak_maps.push(obj.header.as_ptr());
     }
 
+    #[inline(never)]
+    #[cold]
     pub fn collect(&mut self) {
         self.pages.collect();
     }
@@ -234,6 +237,8 @@ impl<T: ManagedObject + Hash> Hash for Managed<T> {
         (**self).hash(state)
     }
 }
+
+
 
 impl<T: ManagedObject> Deref for Managed<T> {
     type Target = T;

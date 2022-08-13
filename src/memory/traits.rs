@@ -161,3 +161,54 @@ unsafe impl<T: Finalize> Finalize for Option<T> {}
 unsafe impl<T: Allocation> Allocation for Option<T> {}
 
 impl<T: ManagedObject> ManagedObject for Option<T> {}
+
+
+macro_rules! impl_tuple {
+    (
+        $(
+            (
+                $($var: ident)*
+            )
+        ),*
+    ) => {
+        $(
+            impl<$($var: ManagedObject),*> ManagedObject for ($($var,)*) {}
+            unsafe impl<$($var: Allocation),*> Allocation for ($($var,)*) {
+                const HAS_GCPTRS: bool = $($var::HAS_GCPTRS)||* || false;
+                const LIGHT_FINALIZER: bool = $($var::LIGHT_FINALIZER)&&* || std::mem::needs_drop::<Self>();
+                const FINALIZE: bool = $($var::FINALIZE)||* || std::mem::needs_drop::<Self>();
+            }
+            #[allow(non_snake_case)]
+            unsafe impl<$($var: Trace),*> Trace for ($($var,)*) {
+                fn trace(&self, visitor: &mut dyn Visitor) {
+                    let ($($var,)*) = self;
+                    $(
+                        $var.trace(visitor);
+                    )*
+                    let _ = visitor;
+                }
+            }
+            unsafe impl<$($var: Finalize),*> Finalize for ($($var,)*) {}
+        )*
+    };
+}
+
+impl_tuple!(
+    (A),
+    (A B),
+    (A B C),
+    (A B C D),
+    (A B C D E),
+    (A B C D E F),
+    (A B C D E F G),
+    (A B C D E F G H),
+    (A B C D E F G H I),
+    (A B C D E F G H I J),
+    (A B C D E F G H I J K),
+    (A B C D E F G H I J K L),
+    (A B C D E F G H I J K L M),
+    (A B C D E F G H I J K L M N),
+    (A B C D E F G H I J K L M N O),
+    (A B C D E F G H I J K L M N O P),
+    (A B C D E F G H I J K L M N O P Q)
+);

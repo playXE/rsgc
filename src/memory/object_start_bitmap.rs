@@ -1,4 +1,4 @@
-use std::mem::size_of;
+use std::{mem::size_of, ptr::null_mut};
 
 use crate::base::{
     constants::{ALLOCATION_GRANULARITY, ALLOCATION_MASK},
@@ -36,31 +36,54 @@ impl ObjectStartBitmap {
         this
     }
 
+    pub fn offset_index_bit(offset: usize) -> usize 
+    {
+        (offset / ALLOCATION_GRANULARITY) % BITS_PER_CELL
+    }
+    pub fn clear_range(&mut self, begin: usize, end: usize) {
+        let mut begin_offset = begin.wrapping_sub(self.offset);
+        let mut end_offset = end.wrapping_sub(self.offset);
+
+        while begin_offset < end_offset && Self::offset_index_bit(begin_offset) != 0 {
+            self.clear_bit(self.offset + begin_offset);
+            begin_offset += ALLOCATION_GRANULARITY;
+        }
+
+        while begin_offset < end_offset && Self::offset_index_bit(end_offset) != 0 {
+            end_offset -= ALLOCATION_GRANULARITY;
+            self.clear_bit(self.offset + end_offset);
+        }
+    }
     pub fn find_header(&self, maybe_middle_of_an_object: usize) -> *mut ObjectHeader {
         let object_offset = maybe_middle_of_an_object.wrapping_sub(self.offset);
         let object_start_number = object_offset.wrapping_div(ALLOCATION_GRANULARITY);
         let mut cell_index = object_start_number.wrapping_div(BITS_PER_CELL);
 
         let bit = object_start_number & CELL_MASK;
-        let mut byte = self.object_start_bitmap[cell_index] & ((1 << (bit + 1)) - 1);
+        let mut byte = self.object_start_bitmap[cell_index] & ((1 << (bit + 1)) - 1) as u8;
 
         while byte == 0 && cell_index > 0 {
             cell_index -= 1;
             byte = self.object_start_bitmap[cell_index];
         }
 
-        let leading_zeros = count_leading_zeros_8(byte) as usize;
 
         let object_start_number = (cell_index.wrapping_mul(BITS_PER_CELL))
             .wrapping_add(BITS_PER_CELL - 1)
-            .wrapping_sub(leading_zeros as usize);
+            .overflowing_sub(count_leading_zeros_8(byte) as usize).0;
 
         let object_offset = object_start_number.wrapping_mul(ALLOCATION_GRANULARITY);
-        object_offset.wrapping_add(self.offset) as *mut ObjectHeader
+        let offset = object_offset.wrapping_add(self.offset);
+        if offset < self.offset {
+            return null_mut();
+        } else {
+            offset as _
+        }
     }
+    #[inline]
     pub fn set_bit(&mut self, addr: usize) {
         let (index, bit) = self.object_start_index_bit(addr);
-        self.object_start_bitmap[index] |= 1 << bit;
+        unsafe { *self.object_start_bitmap.get_unchecked_mut(index) |= 1 << bit };
     }
 
     pub fn clear_bit(&mut self, addr: usize) {
@@ -69,6 +92,7 @@ impl ObjectStartBitmap {
     }
 
     pub fn check_bit(&self, addr: usize) -> bool {
+        
         let (index, bit) = self.object_start_index_bit(addr);
         (self.object_start_bitmap[index] & (1 << bit)) != 0
     }
@@ -76,6 +100,7 @@ impl ObjectStartBitmap {
         self.fully_populated = false;
         self.object_start_bitmap.fill(0);
     }
+    #[inline]
     pub fn object_start_index_bit(&self, addr: usize) -> (usize, usize) {
         let object_offset = addr.wrapping_sub(self.offset);
         let object_start_number = object_offset / ALLOCATION_GRANULARITY;
