@@ -30,21 +30,44 @@ bitfield! {
     bool, finalization_ordering,set_finalization_ordering: 4;
 }*/
 
+#[repr(C)]
+pub struct Tracer<'a> {
+    pub visitor: &'a mut dyn Visitor,
+}
+
+impl<'a> Visitor for Tracer<'a> {
+    unsafe fn visit_pointer(&mut self, object: *mut ObjectHeader) {
+        self.visitor.visit_pointer(object);
+    }
+
+    unsafe fn visit_conservative(&mut self, from: *mut u8, to: *mut u8) {
+        self.visitor.visit_conservative(from, to)
+    }
+
+    unsafe fn visit_pointers_len(&mut self, first: *const *mut ObjectHeader, len: usize) {
+        self.visitor.visit_pointers_len(first, len)
+    }
+
+    fn visit_weak_persistent_handles(&self) -> bool {
+        self.visitor.visit_weak_persistent_handles()
+    }
+}
+
+#[repr(C)]
 pub struct VTable {
     pub size: usize,
     pub is_varsize: bool,
     pub varsize: VarSize,
-    pub trace: fn(*mut (), visitor: &mut dyn Visitor),
-    pub finalize: Option<fn(*mut ())>,
+    pub trace: extern "C" fn(*mut (), visitor: &mut Tracer),
+    pub finalize: Option<extern "C" fn(*mut ())>,
     /// Set to true when type finalizer cannot revive object i.e when finalizer is equal to `T::drop`
     pub light_finalizer: bool,
     pub type_id: TypeId,
     pub type_name: &'static str,
     /// Offsets of weak ref fields
     pub weak_refs: &'static [usize],
-    pub(crate) weak_map_process: Option<fn(*mut (), &mut dyn FnMut(*mut ObjectHeader) -> *mut ObjectHeader)>,
+    pub(crate) weak_map_process: Option<extern "C" fn(*mut (), &mut WeakMapProcessor)>,
 }
-
 
 pub struct VarSize {
     pub itemsize: usize,
@@ -52,7 +75,6 @@ pub struct VarSize {
     pub offset_of_variable_part: usize,
     pub field_might_be_object: fn(at: *mut u8) -> *mut ObjectHeader,
 }
-
 
 /*
 quasiconst! {
@@ -176,8 +198,6 @@ pub type FinalizationOrderingTag = BitField<1, FINALIZATION_ORDERING, false>;
 pub type InitializedTag = BitField<1, INITIALIZED_TAG, false>;
 use crate::base::bitfield::ToAtomicBitField;
 
-
-
 pub struct ObjectHeader {
     pub bits: u64,
 }
@@ -214,12 +234,12 @@ impl ObjectHeader {
     #[inline]
     pub fn is_visited_unsynchronized(&self) -> bool {
         VisitedTag::decode(self.bits) != 0
-    }   
+    }
     #[inline]
     pub fn set_visited(&mut self) {
         self.bits = VisitedTag::update(1, self.bits);
         //VisitedTag::make_atomic(&self.bits).update(1);
-    }   
+    }
     #[inline]
     pub fn clear_visited(&mut self) -> bool {
         if self.is_visited() {
@@ -227,9 +247,8 @@ impl ObjectHeader {
             return true;
         } else {
             self.bits = VisitedTag::update(0, self.bits);
-            false 
+            false
         }
-       
     }
     #[inline]
     pub fn clear_visited_unsync(&mut self) {
@@ -341,9 +360,10 @@ impl ObjectHeader {
         if self.no_heap_ptrs() {
             return;
         }
-        
+
         let vt = self.vtable();
-        (vt.trace)(self.data() as _, visitor);
+
+        (vt.trace)(self.data() as _, &mut Tracer { visitor });
     }
 
     pub fn visit_pointers(&mut self, visitor: &mut dyn Visitor) -> usize {

@@ -1183,6 +1183,37 @@ impl Pages {
         }
     }
 
+    pub unsafe fn malloc_manual(&mut self, vtable: &'static VTable, size: usize ,has_gcptrs: bool, light_finalizer: bool, finalize: bool, has_weakptr: bool) -> *mut ObjectHeader {
+        let size = round_up(size as isize + size_of::<ObjectHeader>() as isize, OBJECT_ALIGNMENT as _) as usize;
+        let result = self.try_allocate_internal(size);
+        if result == 0 {
+            std::panic::panic_any(MemoryError);
+        }
+        let result = result as *mut ObjectHeader;
+        (*result).set_vtable(vtable as *const VTable as usize);
+        (*result).set_heap_size(size);
+        (*result).clear_visited_unsync();
+        
+        if !has_gcptrs {
+            (*result).set_no_heap_ptrs();
+        }
+
+        #[cold]
+        fn post_malloc(heap: &mut Pages, light_finalizer: bool, finalize: bool, has_weakptr: bool, obj: *mut ObjectHeader) {
+            if light_finalizer && finalize {
+                heap.destructible.push(obj);
+            } else if finalize && !light_finalizer {
+                heap.finalizable.push(obj);
+            }
+    
+            if has_weakptr {
+                heap.weak_refs.push(obj);
+            }
+        }
+        post_malloc(self, light_finalizer, finalize, has_weakptr,result);
+        result 
+    }
+
     pub fn malloc_fixedsize<A: 'static + Allocation>(&mut self) -> *mut ObjectHeader {
         let size = round_up(
             A::SIZE as isize + size_of::<ObjectHeader>() as isize,

@@ -10,7 +10,7 @@ use std::{
 use crate::base::formatted_size;
 
 use self::{
-    object_header::ObjectHeader,
+    object_header::{ObjectHeader, VTable},
     page::{PageSpaceConfig, Pages},
     traits::{Allocation, Finalize, ManagedObject, Trace},
 };
@@ -58,6 +58,25 @@ impl Heap {
                 marker: PhantomData,
             }
         }
+    }
+
+    pub unsafe fn malloc(
+        &mut self,
+        vtable: &'static VTable,
+        size: usize,
+        has_gcptrs: bool,
+        light_finalizer: bool,
+        finalize: bool,
+        has_weakptr: bool,
+    ) -> *mut ObjectHeader {
+        self.pages.malloc_manual(
+            vtable,
+            size,
+            has_gcptrs,
+            light_finalizer,
+            finalize,
+            has_weakptr,
+        )
     }
 
     pub fn manage<T: 'static + Allocation + ManagedObject>(&mut self, value: T) -> Managed<T> {

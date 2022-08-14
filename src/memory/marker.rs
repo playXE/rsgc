@@ -6,7 +6,7 @@ use super::{
     object_header::ObjectHeader,
     page::Pages,
     pointer_block::{MarkerWorkList, MarkingStack},
-    traits::Trace,
+    traits::{Trace, WeakMapProcessor},
     visitor::Visitor,
 };
 
@@ -86,7 +86,9 @@ impl LocalMarker {
                 // invoke weak map processor that will remove dead keys from hash map
                 ((*raw_obj).vtable().weak_map_process.unwrap())(
                     raw_obj.add(1).cast(),
-                    &mut callback,
+                    &mut WeakMapProcessor {
+                        callback: &mut callback,
+                    },
                 );
                 true
             } else {

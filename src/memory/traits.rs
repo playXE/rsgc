@@ -36,23 +36,37 @@ pub unsafe trait Allocation: Trace + Finalize + Sized {
     }
 }
 
-pub fn finalize_erased<T: Finalize>(ptr: *mut ()) {
+pub extern "C" fn finalize_erased<T: Finalize>(ptr: *mut ()) {
     unsafe {
         (&mut *ptr.cast::<T>()).finalize();
     }
 }
 
-pub(crate) fn weak_map_process_erased<T: Finalize>(ptr: *mut (), callback: &mut dyn FnMut(*mut ObjectHeader) -> *mut ObjectHeader) {
+#[repr(C)]
+pub struct WeakMapProcessor<'a> {
+    pub callback: &'a mut dyn FnMut(*mut ObjectHeader) -> *mut ObjectHeader,
+}
+
+impl<'a> WeakMapProcessor<'a> {
+    pub fn process(&mut self, obj: *mut ObjectHeader) -> *mut ObjectHeader {
+        (self.callback)(obj)
+    }
+}
+
+pub(crate) extern "C" fn weak_map_process_erased<T: Finalize>(
+    ptr: *mut (),
+    callback: &mut WeakMapProcessor,
+) {
     unsafe {
         (&mut *ptr.cast::<T>()).__weak_map_process(callback);
     }
 }
 
-pub fn trace_erased<T: Trace>(ptr: *mut (), visitor: &mut dyn Visitor) {
+pub extern "C" fn trace_erased<T: Trace>(ptr: *mut (), visitor: &mut Tracer) {
     unsafe {
         let value = ptr.cast::<T>();
 
-        (&mut *value).trace(visitor);
+        (&mut *value).trace(&mut *visitor);
     }
 }
 
@@ -70,8 +84,8 @@ pub unsafe trait Finalize {
     }
 
     #[doc(hidden)]
-    fn __weak_map_process(&mut self, callback: &mut dyn FnMut(*mut ObjectHeader) -> *mut ObjectHeader) {
-        let _ = callback;
+    fn __weak_map_process(&mut self, processor: &mut WeakMapProcessor<'_>) {
+        let _ = processor;
     }
 }
 
@@ -161,7 +175,6 @@ unsafe impl<T: Finalize> Finalize for Option<T> {}
 unsafe impl<T: Allocation> Allocation for Option<T> {}
 
 impl<T: ManagedObject> ManagedObject for Option<T> {}
-
 
 macro_rules! impl_tuple {
     (
