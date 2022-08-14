@@ -369,6 +369,7 @@ pub struct PageSpaceController {
     pub bounded_heap_size: Option<usize>,
     pub sweep_mode: SweepMode,
     pub gc_count: usize,
+    pub swept_at_mutator_time: usize,
 }
 
 impl PageSpaceController {
@@ -427,6 +428,7 @@ impl PageSpaceController {
             used_bytes: 0,
             gc_count: 0,
             sweep_mode: config.sweep_mode,
+            swept_at_mutator_time: 0,
         };
 
         this.set_major_threshold_from(0.0);
@@ -460,8 +462,10 @@ impl PageSpaceController {
     }
 
     pub fn set_major_threshold_from(&mut self, mut threshold: f64) -> bool {
-        let threshold_max = self.next_collection_initial as f64 * self.heap_growth_factor_max;
-
+        let threshold_max = round_up(
+            (self.next_collection_initial as f64 * self.heap_growth_factor_max) as _,
+            PAGE_SIZE as _,
+        ) as f64;
         if threshold > threshold_max {
             threshold = threshold_max;
         }
@@ -480,10 +484,24 @@ impl PageSpaceController {
             bounded = false;
         }
 
+        let threshold = round_up(threshold as _, PAGE_SIZE as _) as usize + 1024;
+
         self.next_collection_initial = threshold as _;
         self.next_collection_threshold = threshold as _;
-
         bounded
+    }
+
+    pub fn set_max_heap_size(&mut self, size: Option<usize>) {
+        self.max_heap_size = size;
+        if let Some(size) = self.max_heap_size {
+            if size > 0 {
+                if size < self.next_collection_initial {
+                    self.next_collection_initial = size;
+                } else {
+                    self.next_collection_threshold = size;
+                }
+            }
+        }
     }
 }
 
@@ -764,10 +782,14 @@ impl Pages {
             let mut largest_free_list_entry = 0;
             let used_in_bytes =
                 self.sweep_page(self.sweep_pages, &mut largest_free_list_entry, size);
-
+            self.controller.swept_at_mutator_time += 1;
             if largest_free_list_entry >= size {
                 let page = self.sweep_pages;
                 self.sweep_pages = next.cast();
+                /*println!(
+                    "lazy sweep succeed for {} (entry {})",
+                    size, largest_free_list_entry
+                );*/
                 self.add_page(page);
                 return true;
             } else if used_in_bytes == 0 {
@@ -940,16 +962,21 @@ impl Pages {
         self.try_allocate_internal(size)
     }
 
-    unsafe fn sweep_regular(&mut self) {
+    unsafe fn sweep_regular(&mut self, verbose: bool) {
         let mut page = self.sweep_pages;
+        let mut live = 0;
+        let mut dead = 0;
+        self.controller.swept_at_mutator_time = 0;
         while !page.is_null() {
             let next = (*page).next;
             let used = self.sweep_page(page, &mut 0, usize::MAX);
             if used != 0 {
                 // if page has live objects we just add it to pages list
                 self.add_page(page);
+                live += 1;
                 self.controller.used_bytes += PAGE_SIZE;
             } else {
+                dead += 1;
                 // otherwise we free it
                 // todo: add free page pool
                 free_page(page.cast());
@@ -957,6 +984,12 @@ impl Pages {
             page = next.cast();
         }
         self.sweep_pages = null_mut();
+        if verbose {
+            println!(
+                "[GC({})] finish lazy sweep before collection, {} live, {} dead",
+                self.controller.gc_count, live, dead
+            );
+        }
     }
 
     pub fn sweep(&mut self) {
@@ -991,7 +1024,7 @@ impl Pages {
 
             // check if we should sweep right after marking
             if self.controller.should_sweep_synchronously() {
-                self.sweep_regular();
+                self.sweep_regular(false);
             } else {
                 let mut page = self.sweep_pages;
                 while !page.is_null() {
@@ -1049,6 +1082,12 @@ impl Pages {
                 self.controller.gc_count,
                 formatted_size(self.controller.used_bytes)
             );
+            if self.controller.sweep_mode == SweepMode::Lazy {
+                println!(
+                    "\tswept at mutator time: {}",
+                    self.controller.swept_at_mutator_time
+                );
+            }
             Some(std::time::Instant::now())
         } else {
             None
@@ -1056,7 +1095,7 @@ impl Pages {
         if self.controller.sweep_mode == SweepMode::Lazy {
             unsafe {
                 // finish sweeping if needed
-                self.sweep_regular();
+                self.sweep_regular(time.is_some());
             }
         }
         unsafe {
@@ -1093,23 +1132,29 @@ impl Pages {
         // last step is to execute finalizers. They are always executed *after* sweep phase.
         // If they would be executed right after marking there is a chance that they will allocate
         // extra memory and trigger GC. This is not a problem, but it is not nice.
-        if self.finalize_lock {
-            return; // GC inside finalizer; return without executing finalizers
-        }
-        self.finalize_lock = true;
+        if !self.finalize_lock {
+            self.finalize_lock = true;
 
-        while let Some(obj) = self.run_finalizers.pop() {
-            let _ = std::panic::catch_unwind(move || unsafe {
-                match (*obj).vtable().finalize {
-                    Some(cb) => cb(obj.add(1).cast()),
-                    None => (),
-                }
-            });
+            while let Some(obj) = self.run_finalizers.pop() {
+                let _ = std::panic::catch_unwind(move || unsafe {
+                    match (*obj).vtable().finalize {
+                        Some(cb) => cb(obj.add(1).cast()),
+                        None => (),
+                    }
+                });
+            }
+            self.finalize_lock = false;
         }
-        self.finalize_lock = false;
-
         if let Some(time) = time {
-            eprintln!("[GC({})] end in {:.04}ms \n  marking: {:.4}ms,\n  mark words per micro: {}\n  heap usage: {}", self.controller.gc_count, time.elapsed().as_micros() as f64 / 1000.0, marker.marked_micros() as f64 / 1000.0, words_per_micro, formatted_size(self.controller.used_bytes));
+            eprintln!("[GC({})] end in {:.04}ms \n  marking: {:.4}ms,\n  mark words per micro: {}\n  heap usage: {}\n  next collection threshold: {}\n  next collection initial: {}", 
+                self.controller.gc_count, 
+                time.elapsed().as_micros() as f64 / 1000.0, 
+                marker.marked_micros() as f64 / 1000.0, 
+                words_per_micro, 
+                formatted_size(self.controller.used_bytes), 
+                formatted_size(self.controller.next_collection_threshold),
+                formatted_size(self.controller.next_collection_initial)
+            );
         }
         self.controller.gc_count += 1;
     }

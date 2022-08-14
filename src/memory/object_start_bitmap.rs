@@ -1,9 +1,6 @@
 use std::{mem::size_of, ptr::null_mut};
 
-use crate::base::{
-    constants::{ALLOCATION_GRANULARITY, ALLOCATION_MASK},
-    utils::count_leading_zeros_8,
-};
+use crate::base::constants::{ALLOCATION_GRANULARITY, ALLOCATION_MASK};
 
 use super::{object_header::ObjectHeader, page::PAGE_SIZE};
 
@@ -13,6 +10,7 @@ pub const BITMAP_SIZE: usize = (PAGE_SIZE + ((BITS_PER_CELL * ALLOCATION_GRANULA
     / (BITS_PER_CELL * ALLOCATION_GRANULARITY);
 pub const RESERVED_FOR_BITMAP: usize = (BITMAP_SIZE + ALLOCATION_MASK) & !ALLOCATION_MASK;
 
+#[repr(C)]
 pub struct ObjectStartBitmap {
     offset: usize,
     fully_populated: bool,
@@ -36,8 +34,7 @@ impl ObjectStartBitmap {
         this
     }
 
-    pub fn offset_index_bit(offset: usize) -> usize 
-    {
+    pub fn offset_index_bit(offset: usize) -> usize {
         (offset / ALLOCATION_GRANULARITY) % BITS_PER_CELL
     }
     pub fn clear_range(&mut self, begin: usize, end: usize) {
@@ -67,17 +64,17 @@ impl ObjectStartBitmap {
             byte = self.object_start_bitmap[cell_index];
         }
 
-
         let object_start_number = (cell_index.wrapping_mul(BITS_PER_CELL))
             .wrapping_add(BITS_PER_CELL - 1)
-            .overflowing_sub(count_leading_zeros_8(byte) as usize).0;
+            .wrapping_sub(byte.leading_zeros() as usize);
 
         let object_offset = object_start_number.wrapping_mul(ALLOCATION_GRANULARITY);
-        let offset = object_offset.wrapping_add(self.offset);
-        if offset < self.offset {
+        let addr = object_offset.wrapping_add(self.offset);
+        if addr < self.offset {
+            // if overflow happens this might point to `page->object_start() - 16` instead and that is not valid location.
             return null_mut();
         } else {
-            offset as _
+            addr as _
         }
     }
     #[inline]
@@ -92,7 +89,6 @@ impl ObjectStartBitmap {
     }
 
     pub fn check_bit(&self, addr: usize) -> bool {
-        
         let (index, bit) = self.object_start_index_bit(addr);
         (self.object_start_bitmap[index] & (1 << bit)) != 0
     }

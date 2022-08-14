@@ -64,7 +64,7 @@ impl Heap {
         let header = self.pages.malloc_fixedsize::<T>();
         unsafe {
             (*header).data_mut().cast::<T>().write(value);
-            (*header).set_initialized();
+            //(*header).set_initialized();
             Managed {
                 header: NonNull::new_unchecked(header),
                 marker: PhantomData,

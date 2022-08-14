@@ -58,7 +58,7 @@ fn main() {
     let config = PageSpaceConfig::from_env();
     let mut heap = Heap::new(config);
     let min_depth = 4;
-    let max_depth = min_depth + 2;
+    let max_depth = min_depth + 8;
     {
         let stretch_depth = max_depth + 1;
         let stretch_tree = bottom_up_tree(&mut heap, 0, stretch_depth);
@@ -92,4 +92,5 @@ fn main() {
         max_depth,
         item_check(_long_lived_tree, 0)
     );
+    heap.collect();
 }
