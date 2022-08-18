@@ -529,7 +529,6 @@ pub struct Pages {
     pub(crate) finalize_lock: bool,
     pub(crate) trace_callbacks: HashMap<u32, Box<dyn Trace>>,
     pub(crate) key: u32,
-    pub(crate) stack: Stack,
     pub(crate) max_heap_size_already_raised: bool,
 }
 
@@ -578,7 +577,6 @@ impl Pages {
             weak_refs: SegmentedVec::new(),
             key: 0,
             trace_callbacks: HashMap::new(),
-            stack: Stack::new(),
             weak_maps: SegmentedVec::new(),
             run_finalizers: Vec::new(),
             max_heap_size_already_raised: false,
@@ -1104,7 +1102,7 @@ impl Pages {
         let mut marker = GCMarker::new();
         let mut callbacks = std::mem::replace(&mut self.trace_callbacks, HashMap::new());
         let mut roots = Roots {
-            stack: self.stack,
+            stack: Stack::new(),
             finalizable: std::mem::replace(&mut self.run_finalizers, vec![]),
             trace_callbacks: &mut callbacks,
         };

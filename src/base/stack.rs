@@ -3,6 +3,13 @@ use std::{
     ptr::{null, DynMetadata},
 };
 
+thread_local! {
+    static STACK_BOUNDS: StackBounds = StackBounds::current_thread_stack_bounds();
+}
+
+pub fn stack_bounds() -> StackBounds {
+    STACK_BOUNDS.with(|bounds| *bounds)
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -16,11 +23,11 @@ impl Stack {
     }
     pub fn new() -> Self {
         Self {
-            stack_start: StackBounds::current_thread_stack_bounds().origin as _,
+            stack_start: stack_bounds().origin,
         }
     }
     pub fn is_on_stack(&self, addr: *const u8) -> bool {
-       approximate_stack_pointer().cast::<u8>() <= addr && addr <= self.stack_start
+        approximate_stack_pointer().cast::<u8>() <= addr && addr <= self.stack_start
     }
     #[inline(never)]
     pub fn iterate_pointers(&self, visitor: &mut dyn StackVisitor) {
@@ -33,6 +40,10 @@ impl Stack {
             approximate_stack_pointer() as _,
         );
     }
+}
+
+pub fn iterate_pointers(visitor: &mut dyn StackVisitor) {
+    Stack::new().iterate_pointers(visitor);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
