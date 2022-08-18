@@ -147,17 +147,18 @@ unsafe impl<T: ?Sized + ManagedObject> Trace for Managed<T> {
 unsafe impl<T: ?Sized + ManagedObject> Finalize for Managed<T> {}
 impl<T: ?Sized + ManagedObject> ManagedObject for Managed<T> {}
 
-impl<K: Trace, V: Trace, S> ManagedObject for std::collections::HashMap<K, V, S> {}
-unsafe impl<K: Trace, V: Trace, S> Allocation for std::collections::HashMap<K, V, S> {
+impl<K: Trace, V: Trace, S: Trace> ManagedObject for std::collections::HashMap<K, V, S> {}
+unsafe impl<K: Trace, V: Trace, S: Trace> Allocation for std::collections::HashMap<K, V, S> {
     const HAS_GCPTRS: bool = true;
 }
 
-unsafe impl<K: Trace, V: Trace, S> Trace for std::collections::HashMap<K, V, S> {
+unsafe impl<K: Trace, V: Trace, S: Trace> Trace for std::collections::HashMap<K, V, S> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         for (key, value) in self.iter() {
             key.trace(visitor);
             value.trace(visitor);
         }
+        self.hasher().trace(visitor);
     }
 }
 
@@ -225,3 +226,27 @@ impl_tuple!(
     (A B C D E F G H I J K L M N O P),
     (A B C D E F G H I J K L M N O P Q)
 );
+
+unsafe impl<const N: usize, T: Trace> Trace for [T; N] {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        for i in 0..N {
+            self[i].trace(visitor);
+        }
+    }
+}
+
+unsafe impl<const N: usize, T: Finalize> Finalize for [T; N] {}
+
+unsafe impl<T: Trace> Trace for Vec<T> {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        self.iter().for_each(|value| value.trace(visitor));
+    }
+}
+unsafe impl<T: Finalize> Finalize for Vec<T> {}
+
+unsafe impl<T: Trace + Finalize> Allocation for Vec<T> {
+    const FINALIZE: bool = true;
+    const LIGHT_FINALIZER: bool = true;
+    const HAS_WEAKPTR: bool = false;
+}
+
