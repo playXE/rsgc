@@ -28,6 +28,18 @@ impl<T: Trace> Array<T> {
     }
 }
 
+impl<T: Trace> AsRef<[T]> for Array<T> {
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T: Trace> AsMut<[T]> for Array<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self.as_slice_mut()
+    }
+}
+
 impl<T: Trace> Deref for Array<T> {
     type Target = [T];
     fn deref(&self) -> &Self::Target {
@@ -79,6 +91,7 @@ unsafe impl<T: Trace + Finalize> Finalize for Array<T> {
     }
 }
 
+
 impl<T: Trace + Finalize> ManagedObject for Array<T> {}
 
 pub trait IsManaged {
@@ -92,8 +105,6 @@ impl<T: ManagedObject + ?Sized> IsManaged for Managed<T> {
 impl<T: ManagedObject + ?Sized> IsManaged for WeakRef<T> {
     const IS_MANAGED: bool = true;
 }
-
-
 
 default impl<T> IsManaged for T {
     const IS_MANAGED: bool = false;

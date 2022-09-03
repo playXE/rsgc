@@ -1,4 +1,4 @@
-use std::{ptr::null_mut, sync::atomic::AtomicUsize};
+use std::{ptr::null_mut, sync::atomic::AtomicUsize, mem::size_of};
 
 use crate::base::segmented_vec::SegmentedVec;
 
@@ -60,9 +60,10 @@ impl LocalMarker {
             if (*raw_obj).is_visited() {
                 let data = (*raw_obj).data_mut();
                 for offset in (*raw_obj).vtable().weak_refs.iter().copied() {
-                    let weak_slot = data.add(offset).cast::<*mut ObjectHeader>();
+                    let weak_slot = data.add(offset).cast::<*mut u8>();
                     let weak_ref = *weak_slot;
-                    if !(*weak_ref).is_visited() {
+                    let header = weak_ref.sub(size_of::<ObjectHeader>()).cast::<ObjectHeader>();
+                    if !(*header).is_visited() {
                         weak_slot.write(null_mut());
                     }
                 }

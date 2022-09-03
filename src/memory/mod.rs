@@ -2,7 +2,7 @@ use std::{
     any::TypeId,
     hash::Hash,
     marker::PhantomData,
-    mem::MaybeUninit,
+    mem::{MaybeUninit, size_of},
     ops::{Deref, DerefMut},
     ptr::NonNull,
 };
@@ -54,7 +54,7 @@ impl Heap {
         let header = self.pages.malloc_fixedsize::<T>();
         unsafe {
             Managed {
-                header: NonNull::new_unchecked(header),
+                ptr: NonNull::new_unchecked(header.add(1).cast()),
                 marker: PhantomData,
             }
         }
@@ -85,7 +85,7 @@ impl Heap {
             (*header).data_mut().cast::<T>().write(value);
             //(*header).set_initialized();
             Managed {
-                header: NonNull::new_unchecked(header),
+                ptr: NonNull::new_unchecked(header.add(1).cast()),
                 marker: PhantomData,
             }
         }
@@ -99,7 +99,7 @@ impl Heap {
         let header = self.pages.malloc_varsize::<T>(length);
         unsafe {
             Managed {
-                header: NonNull::new_unchecked(header),
+                ptr: NonNull::new_unchecked(header.add(1).cast()),
                 marker: PhantomData,
             }
         }
@@ -107,16 +107,16 @@ impl Heap {
     /// Creates a new [`WeakRef<T>`](WeakRef) to a [`Managed<T>`](Managed) object.
     pub fn weak<T: 'static + ManagedObject + ?Sized>(&mut self, value: Managed<T>) -> WeakRef<T> {
         let object = self.manage(WeakRefInner {
-            field: value.header.as_ptr(),
+            field: value.ptr() as *mut u8,
             marker: Default::default(),
         });
 
         WeakRef { pointer: object }
     }
 
-    pub unsafe fn add_weak_map<T: Allocation + ManagedObject + ?Sized>(&mut self, obj: Managed<T>) {
+    pub unsafe fn add_weak_map<T: Allocation + ManagedObject + ?Sized>(&mut self, mut obj: Managed<T>) {
         assert!(T::__IS_WEAKMAP, "T::__IS_WEAKMAP must be set to true");
-        self.pages.weak_maps.push(obj.header.as_ptr());
+        self.pages.weak_maps.push(obj.header_mut() as *mut ObjectHeader);
     }
 
     #[inline(never)]
@@ -214,26 +214,31 @@ impl std::fmt::Display for HeapStats {
 
 #[repr(transparent)]
 pub struct Managed<T: ManagedObject + ?Sized> {
-    header: NonNull<ObjectHeader>,
+    ptr: NonNull<u8>,
     marker: PhantomData<*mut T>,
 }
 
 impl<T: ManagedObject + ?Sized> Managed<T> {
-    pub fn ptr(self) -> *const u8 {
-        self.header.as_ptr().cast()
-    }
-    pub(crate) fn header(&self) -> &ObjectHeader {
-        unsafe { self.header.as_ref() }
-    }
-    #[allow(dead_code)]
-    pub(crate) fn header_mut(&mut self) -> &mut ObjectHeader {
-        unsafe { self.header.as_mut() }
+
+    pub fn header(&self) -> &ObjectHeader {
+        unsafe { &*(self.ptr.as_ptr().sub(size_of::<ObjectHeader>()) as *const ObjectHeader) }
     }
 
+    pub unsafe fn header_mut(&mut self) -> &mut ObjectHeader {
+        unsafe { &mut *(self.ptr.as_ptr().sub(size_of::<ObjectHeader>()) as *mut ObjectHeader) }
+    }
+    pub fn vtable(&self) -> &'static VTable {
+        self.header().vtable()
+    }
+
+    pub fn ptr(self) -> *const u8 {
+        self.ptr.as_ptr()
+    }
+    
     pub fn downcast<U: 'static + ManagedObject + ?Sized>(self) -> Option<Managed<U>> {
         if self.header().vtable().type_id == TypeId::of::<U>() {
             Some(Managed {
-                header: self.header,
+                ptr: self.ptr,
                 marker: PhantomData,
             })
         } else {
@@ -300,12 +305,12 @@ impl<T: ManagedObject> DerefMut for Managed<T> {
 use std::fmt;
 impl<T: ManagedObject + ?Sized> fmt::Pointer for Managed<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Managed({:p})", self.header)
+        write!(f, "Managed({:p})", self.ptr())
     }
 }
 use memoffset::offset_of;
 struct WeakRefInner<T: ?Sized> {
-    field: *mut ObjectHeader,
+    field: *mut u8,
     marker: PhantomData<*mut T>,
 }
 
@@ -330,13 +335,13 @@ impl<T: ?Sized> WeakRef<T> {
     where
         T: ManagedObject,
     {
-        let header = self.pointer.field;
-        if header.is_null() {
+        let ptr = self.pointer.field;
+        if ptr.is_null() {
             None
         } else {
             unsafe {
                 Some(Managed {
-                    header: NonNull::new_unchecked(header),
+                    ptr: NonNull::new_unchecked(ptr),
                     marker: Default::default(),
                 })
             }
@@ -477,19 +482,19 @@ impl<T> Clone for WeakRef<T> {
 /// Field of a structure that points to a weak reference. Should always be used only inside
 /// structures.
 pub struct WeakField<T: ?Sized> {
-    pointer: *mut ObjectHeader,
+    pointer: *mut u8,
     marker: PhantomData<T>,
 }
 
 impl<T: ManagedObject + ?Sized> WeakField<T> {
     pub fn upgrade(&self) -> Option<Managed<T>> {
         unsafe {
-            let header = self.pointer;
-            if header.is_null() {
+            let ptr = self.pointer;
+            if ptr.is_null() {
                 None
             } else {
                 Some(Managed {
-                    header: NonNull::new_unchecked(header),
+                    ptr: NonNull::new_unchecked(ptr),
                     marker: PhantomData,
                 })
             }
@@ -502,18 +507,18 @@ impl<T: ManagedObject + ?Sized> WeakField<T> {
 
     pub unsafe fn new(object: Managed<T>) -> Self {
         Self {
-            pointer: object.header.as_ptr(),
+            pointer: object.ptr.as_ptr(),
             marker: PhantomData,
         }
     }
 }
 
 impl<T: ManagedObject> Managed<MaybeUninit<T>> {
-    pub unsafe fn assume_init(self) -> Managed<T> {
-        (*self.header.as_ptr()).set_initialized();
+    pub unsafe fn assume_init(mut self) -> Managed<T> {
+        (*self.header_mut()).set_initialized();
 
         Managed {
-            header: self.header,
+            ptr: self.ptr,
             marker: PhantomData,
         }
     }

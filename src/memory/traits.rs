@@ -1,9 +1,13 @@
+use std::{ptr::null, mem::size_of};
+
 use crate::{memory::object_header::*, Managed};
 
 use super::visitor::*;
 
 /// Trait that specifies allocation behaviour.
 pub unsafe trait Allocation: Trace + Finalize + Sized {
+    const USER_VTABLE: *const () = null();
+
     /// If true then [T::finalize](Finalize::finalize) is invoked on the object when it is dead
     const FINALIZE: bool = core::mem::needs_drop::<Self>();
     /// If true then finalizer of this object cannot revive objects
@@ -139,7 +143,7 @@ unsafe impl<T: ?Sized + ManagedObject> Allocation for Managed<T> {
 unsafe impl<T: ?Sized + ManagedObject> Trace for Managed<T> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         unsafe {
-            visitor.visit_pointer(self.header.as_ptr());
+            visitor.visit_pointer(self.ptr.as_ptr().sub(size_of::<ObjectHeader>()).cast());
         }
     }
 }

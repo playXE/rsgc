@@ -67,6 +67,7 @@ pub struct VTable {
     /// Offsets of weak ref fields
     pub weak_refs: &'static [usize],
     pub(crate) weak_map_process: Option<extern "C" fn(*mut (), &mut WeakMapProcessor)>,
+    pub user_vtable: *const (),
 }
 
 pub struct VarSize {
@@ -108,6 +109,7 @@ pub struct VT<T> {
 impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
     const VAL: &'static VTable = &VTable {
         size: T::SIZE,
+        user_vtable: T::USER_VTABLE,
         varsize: VarSize {
             itemsize: T::VARSIZE_ITEM_SIZE,
             offset_of_length: T::VARSIZE_OFFSETOF_LENGTH,

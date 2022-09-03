@@ -822,54 +822,6 @@ impl Pages {
         let page = Page::of(addr).cast::<NormalPage>();
         (*page).bitmap.set_bit(addr as _);
     }
-    /*
-    unsafe fn try_allocate_in_fresh_page(&mut self, size: usize) -> Block {
-        let result = self.lazy_sweep(size);
-        if !result.address.is_null() {
-            return result;
-        }
-        let result;
-
-        if self.controller.used_bytes + PAGE_SIZE >= self.controller.next_collection_threshold {
-            return Block {
-                address: null_mut(),
-                size: 0
-            }; // will trigger GC
-        }
-
-        let page = self.allocate_page(true);
-
-        if page.is_null() {
-            return Block {
-                address: null_mut(),
-                size: 0
-            };
-        }
-        self.controller.used_bytes += PAGE_SIZE;
-
-        result = (*page).object_start();
-        (*page).bitmap.set_bit(result);
-
-        Block { address: result as _, size: (*page).object_end() - (*page).object_start() }
-    }*/
-
-    /*unsafe fn try_allocate_internal(&mut self, size: usize) -> usize {
-        let mut result;
-
-        if size <= LARGE_OBJECT_SIZE_THRESHOLD {
-            result = self.freelist.try_allocate_inline(size);
-
-            if result == 0 {
-                result = self.try_allocate_in_fresh_page(size);
-            } else {
-                Self::set_bit(result);
-            }
-        } else {
-            result = self.try_allocate_in_fresh_large_page(size);
-        }
-
-        result
-    }*/
 
     unsafe fn replace_lab(&mut self, new_buffer: usize, new_size: usize) {
         let lab = &mut self.current_lab;
@@ -1060,13 +1012,6 @@ impl Pages {
                     return null_mut();
                 }
                 (*page).bitmap.find_header(addr)
-
-                /*
-                if (*page).bitmap.check_bit(addr) {
-                    addr as _
-                } else {
-                    null_mut()
-                }*/
             }
         }
     }
