@@ -230,9 +230,19 @@ impl<T: ManagedObject + ?Sized> Managed<T> {
     pub fn vtable(&self) -> &'static VTable {
         self.header().vtable()
     }
+    pub fn ptr_mut(self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
 
     pub fn ptr(self) -> *const u8 {
         self.ptr.as_ptr()
+    }
+
+    pub unsafe fn from_raw(ptr: *mut T) -> Self {
+        Self {
+            ptr: NonNull::new(ptr.cast::<u8>()).unwrap(),
+            marker: PhantomData,
+        }
     }
     
     pub fn downcast<U: 'static + ManagedObject + ?Sized>(self) -> Option<Managed<U>> {
