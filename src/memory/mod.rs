@@ -7,7 +7,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::base::formatted_size;
+use crate::base::{formatted_size, stack::{approximate_stack_pointer, stack_bounds}};
 
 use self::{
     object_header::{ObjectHeader, VTable},
@@ -30,13 +30,32 @@ pub struct Heap {
     pages: Pages,
 }
 
+pub struct ThreadStackScanner;
+
+unsafe impl Trace for ThreadStackScanner {
+    fn trace(&self, visitor: &mut dyn visitor::Visitor) {
+        let mut start = approximate_stack_pointer() as *mut u8;
+        let mut end = stack_bounds().origin;
+        if start > end {
+            std::mem::swap(&mut start, &mut end);
+        }
+        unsafe { visitor.visit_conservative(start, end); }
+    }
+}
+
+
+
 impl Heap {
     pub fn new(config: PageSpaceConfig) -> Self {
         Self {
             pages: Pages::new(config),
         }
     }
-
+    
+    /// Adds core root set to heap. At the moment it is only the thread stack.
+    pub fn add_core_roots(&mut self) {
+        self.add_persistent_root(ThreadStackScanner);
+    }
     pub fn add_persistent_root<T: 'static + Trace>(&mut self, root: T) -> u32 {
         let object = Box::new(root);
 

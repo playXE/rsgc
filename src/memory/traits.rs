@@ -254,3 +254,9 @@ unsafe impl<T: Trace + Finalize> Allocation for Vec<T> {
     const HAS_WEAKPTR: bool = false;
 }
 
+
+unsafe impl<F> Trace for F where F: Fn(&mut dyn Visitor) {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        self(visitor);
+    }
+}

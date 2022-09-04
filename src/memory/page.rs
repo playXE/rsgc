@@ -8,7 +8,6 @@ use super::{
 };
 use crate::base::{
     constants::{ALLOCATION_GRANULARITY, ALLOCATION_MASK, OBJECT_ALIGNMENT, WORD_SIZE_LOG2},
-    stack::Stack,
     utils::{
         read_float_from_env, read_string_from_env, read_uint_from_env, round_up, TinyBloomFilter,
     },
@@ -534,16 +533,11 @@ pub struct Pages {
 
 struct Roots {
     trace_callbacks: *mut HashMap<u32, Box<dyn Trace>>,
-    stack: Stack,
     finalizable: Vec<*mut ObjectHeader>,
 }
 
 unsafe impl Trace for Roots {
     fn trace(&self, visitor: &mut dyn Visitor) {
-        self.stack
-            .iterate_pointers(&mut |slot: *const *const u8, _| unsafe {
-                visitor.visit_conservative(slot as *mut u8, slot.add(1) as *mut u8);
-            });
         unsafe {
             for (_, callback) in (*self.trace_callbacks).iter_mut() {
                 callback.trace(visitor);
@@ -1047,7 +1041,6 @@ impl Pages {
         let mut marker = GCMarker::new();
         let mut callbacks = std::mem::replace(&mut self.trace_callbacks, HashMap::new());
         let mut roots = Roots {
-            stack: Stack::new(),
             finalizable: std::mem::replace(&mut self.run_finalizers, vec![]),
             trace_callbacks: &mut callbacks,
         };

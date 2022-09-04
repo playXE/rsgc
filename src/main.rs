@@ -57,6 +57,7 @@ pub fn make_node(
 fn main() {
     let config = PageSpaceConfig::from_env();
     let mut heap = Heap::new(config);
+    heap.add_core_roots();
     let min_depth = 4;
     let max_depth = min_depth + 8;
     {
