@@ -34,3 +34,30 @@ pub trait FindObjectVisitor {
 
     fn find_object(&self, ptr: *mut ObjectHeader) -> bool;
 }
+
+
+pub struct VisitCounter<'a> {
+    count: usize,
+    pub visitor: &'a mut dyn Visitor,
+}
+
+impl<'a> VisitCounter<'a> {
+    pub fn new(visitor: &'a mut dyn Visitor) -> Self {
+        Self { count: 0, visitor }
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+impl<'a> Visitor for VisitCounter<'a> {
+    unsafe fn visit_pointer(&mut self, object: *mut ObjectHeader) {
+        self.count += 1;
+        self.visitor.visit_pointer(object);
+    }
+
+    unsafe fn visit_conservative(&mut self, from: *mut u8, to: *mut u8) {
+        self.visitor.visit_conservative(from, to);
+    }
+}

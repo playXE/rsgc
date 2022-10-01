@@ -12,6 +12,7 @@ cfg-if = "1.0"
 macro_rules_attribute = "0.1"
 parking_lot = "0.12"
 yastl = "0.1.2"
+bitvec = "1.0"
 [dependencies.memoffset]
 version = "0.6"
 features = ["unstable_const"]

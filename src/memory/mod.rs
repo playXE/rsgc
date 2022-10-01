@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
     mem::{MaybeUninit, size_of},
     ops::{Deref, DerefMut},
-    ptr::NonNull,
+    ptr::NonNull, sync::atomic::{AtomicUsize, Ordering},
 };
 
 use crate::base::{formatted_size, stack::{approximate_stack_pointer, stack_bounds}};
@@ -21,15 +21,19 @@ pub mod marker;
 pub mod object_header;
 pub mod object_start_bitmap;
 pub mod page;
+//pub mod marking_constraint;
 pub mod page_memory;
 pub mod pointer_block;
 pub mod traits;
 pub mod visitor;
 
 pub struct Heap {
+    refs: AtomicUsize,
     pages: Pages,
+    
 }
 
+/// Simple object that is used for scanning thread stack for conservative roots. Added to persistent roots when [Heap::add_core_roots] is invoked. 
 pub struct ThreadStackScanner;
 
 unsafe impl Trace for ThreadStackScanner {
@@ -46,10 +50,11 @@ unsafe impl Trace for ThreadStackScanner {
 
 
 impl Heap {
-    pub fn new(config: PageSpaceConfig) -> Self {
-        Self {
+    pub fn new(config: PageSpaceConfig) -> HeapRef {
+        HeapRef(NonNull::new(Box::into_raw(Box::new(Self {
+            refs: AtomicUsize::new(1),
             pages: Pages::new(config),
-        }
+        }))).unwrap())
     }
     
     /// Adds core root set to heap. At the moment it is only the thread stack.
@@ -317,8 +322,7 @@ impl<T: ManagedObject> Deref for Managed<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe {
-            let data = self.header().data().cast::<T>();
-            &*data
+            &*self.ptr.as_ptr().cast::<T>()
         }
     }
 }
@@ -326,8 +330,7 @@ impl<T: ManagedObject> Deref for Managed<T> {
 impl<T: ManagedObject> DerefMut for Managed<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            let data = self.header().data().cast::<T>() as *mut T;
-            &mut *data
+            &mut *self.ptr.as_ptr().cast::<T>()
         }
     }
 }
@@ -495,6 +498,21 @@ impl<T: ?Sized> WeakRef<T> {
     }
 }
 
+impl<T: ManagedObject> Into<Option<Managed<T>>> for WeakRef<T> {
+    fn into(self) -> Option<Managed<T>> {
+        self.upgrade()
+    }
+}
+
+impl<T: ManagedObject> Into<Option<Managed<T>>> for &WeakField<T> {
+    fn into(self) -> Option<Managed<T>> {
+        if self.pointer.is_null() {
+            return None;
+        }
+        unsafe { Some(Managed::from_raw(self.pointer.cast())) }
+    }
+}
+
 unsafe impl<T: ?Sized> Trace for WeakRef<T> {
     fn trace(&self, visitor: &mut dyn visitor::Visitor) {
         self.pointer.trace(visitor);
@@ -582,3 +600,37 @@ unsafe impl<T: Finalize> Trace for MaybeUninit<T> {
 }
 
 impl<T: ManagedObject> ManagedObject for MaybeUninit<T> {}
+
+pub struct HeapRef(NonNull<Heap>);
+
+impl Deref for HeapRef {
+    type Target = Heap;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl DerefMut for HeapRef {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl Clone for HeapRef {
+    fn clone(&self) -> Self {
+        self.refs.fetch_add(1, Ordering::AcqRel);
+        Self(self.0)
+    }
+}
+
+impl Drop for HeapRef {
+    fn drop(&mut self) {
+        if self.refs.fetch_sub(1, Ordering::SeqCst) == 1 {
+            unsafe {
+                let heap = self.0.as_ptr();
+                let _ = Box::from_raw(heap);
+            }
+        }
+    }
+}

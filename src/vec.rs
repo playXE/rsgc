@@ -1,17 +1,17 @@
 use std::{
     mem::{size_of, MaybeUninit},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Index, IndexMut}, hash::Hash,
 };
 
 use memoffset::offset_of;
 
 use crate::{
-    array::IsManaged,
+    base::{constants::OBJECT_ALIGNMENT, utils::round_up},
     memory::{
         traits::{Allocation, Finalize, ManagedObject, Trace},
         Heap,
     },
-    Managed, base::{utils::round_up, constants::OBJECT_ALIGNMENT},
+    Managed,
 };
 
 #[repr(C)]
@@ -21,7 +21,7 @@ struct Raw<T> {
     data: [MaybeUninit<T>; 0],
 }
 
-unsafe impl<T: Allocation + IsManaged> Allocation for Raw<T> {
+unsafe impl<T: Allocation> Allocation for Raw<T> {
     const FINALIZE: bool = T::FINALIZE;
     const LIGHT_FINALIZER: bool = {
         if T::FINALIZE {
@@ -34,7 +34,6 @@ unsafe impl<T: Allocation + IsManaged> Allocation for Raw<T> {
             false
         }
     };
-    const HAS_GCPTRS: bool = T::HAS_GCPTRS || T::IS_MANAGED;
     const VARSIZE: bool = true;
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
     const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Raw<T>, cap);
@@ -86,7 +85,7 @@ pub struct ManagedVec<T: Trace + Finalize> {
     raw: Managed<Raw<T>>,
 }
 
-impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
+impl<T: Trace + Finalize + Allocation + 'static> ManagedVec<T> {
     pub fn len(&self) -> usize {
         self.raw.len
     }
@@ -162,9 +161,7 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
 
         buf.len = 0;
 
-        Self {
-            raw: buf
-        }
+        Self { raw: buf }
     }
 
     pub fn new(heap: &mut Heap) -> Self {
@@ -186,10 +183,8 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
 
         self.raw.len += 1;
 
-        unsafe {
-            &mut*data.add(len)
-        }
-    } 
+        unsafe { &mut *data.add(len) }
+    }
 
     pub fn try_push(&mut self, value: T) -> Option<&mut T> {
         let (len, capacity) = (self.len(), self.capacity());
@@ -206,9 +201,7 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
 
         self.raw.len += 1;
 
-        Some(unsafe {
-            &mut*data.add(len)
-        })
+        Some(unsafe { &mut *data.add(len) })
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -219,18 +212,14 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
         }
 
         let data = self.data();
-        let value = unsafe {
-            data.add(len - 1).read()
-        };
+        let value = unsafe { data.add(len - 1).read() };
 
         self.raw.len -= 1;
 
         Some(value)
     }
 
-
-    pub fn try_reserve(&mut self, heap: &mut Heap, additional: usize) -> bool
-    {
+    pub fn try_reserve(&mut self, heap: &mut Heap, additional: usize) -> bool {
         let capacity = self.capacity();
         let total_required = self.len().saturating_add(additional);
 
@@ -250,7 +239,7 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
 
         self.grow(heap, new_capacity);
 
-        true 
+        true
     }
 
     pub fn reserve(&mut self, heap: &mut Heap, additional: usize) {
@@ -268,7 +257,11 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
         self.reserve(heap, other_len);
 
         unsafe {
-            core::ptr::copy_nonoverlapping(other.as_ptr(), self.as_mut_ptr().add(self.len()), other_len);
+            core::ptr::copy_nonoverlapping(
+                other.as_ptr(),
+                self.as_mut_ptr().add(self.len()),
+                other_len,
+            );
         }
 
         unsafe {
@@ -281,6 +274,53 @@ impl<T: Trace + Finalize + IsManaged + Allocation + 'static> ManagedVec<T> {
         self.raw.len = len;
     }
 
+    pub fn clear(&mut self) {
+        self.truncate(0);
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        let len = self.len();
+
+        assert!(
+            (index < len),
+            "removal index (is {}) should be < len (is {})",
+            index,
+            len
+        );
+
+        unsafe {
+            let p = self.as_mut_ptr().add(index);
+
+            let x = p.read();
+
+            let src = p.add(1);
+            let dst = p;
+            let count = len - index - 1;
+            core::ptr::copy(src, dst, count);
+
+            self.set_len(len - 1);
+            x
+        }
+    }
+
+    pub fn remove_item<V>(&mut self, item: &V) -> Option<T> 
+    where T: PartialEq<V> {
+        let len = self.len();
+        for i in 0..len {
+            if self[i] == *item {
+                return Some(self.remove(i));
+            }
+        }
+        None
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        &**self
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [T] {
+        &mut **self
+    }
 }
 
 pub const fn next_capacity<T>(capacity: usize) -> usize {
@@ -304,4 +344,92 @@ pub const fn max_elems<T>() -> usize {
     let m = max - (max % OBJECT_ALIGNMENT) - header_bytes;
 
     m / size_of::<T>()
+}
+
+impl<T: Trace + Finalize + Allocation + 'static> Deref for ManagedVec<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.data(), self.len()) }
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static> DerefMut for ManagedVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.len()) }
+    }
+}
+
+
+impl<T: Trace + Finalize + Allocation + 'static> Index<usize> for ManagedVec<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &Self::Output {
+        assert!(index < self.len(), "index out of bounds: the len is {} but the index is {}", self.len(), index);
+
+        unsafe { &*self.data().add(index) }
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static> IndexMut<usize> for ManagedVec<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        assert!(index < self.len(), "index out of bounds: the len is {} but the index is {}", self.len(), index);
+
+        unsafe { &mut *self.data().add(index) }
+    }
+}
+
+
+
+
+impl<T: Trace + Finalize + Allocation + 'static + PartialEq> PartialEq for ManagedVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        for i in 0..self.len() {
+            if self[i] != other[i] {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static + Eq> Eq for ManagedVec<T> {}
+
+impl<T: Trace + Finalize + Allocation + 'static + PartialOrd> PartialOrd for ManagedVec<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.as_slice().partial_cmp(other.as_slice())
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static + Ord> Ord for ManagedVec<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static + Hash> Hash for ManagedVec<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static + std::fmt::Debug> std::fmt::Debug for ManagedVec<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static> AsRef<[T]> for ManagedVec<T> {
+    fn as_ref(&self) -> &[T] {
+        self.as_slice()
+    }
+}
+
+impl<T: Trace + Finalize + Allocation + 'static> AsMut<[T]> for ManagedVec<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self.as_slice_mut()
+    }
 }

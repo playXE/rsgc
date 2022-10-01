@@ -15,6 +15,7 @@ pub mod memory;
 pub mod weak_map;
 pub mod string;
 pub mod vec;
+pub mod threading;
 
 pub use memory::{Managed, WeakField, WeakRef};
 

@@ -144,10 +144,10 @@ pub enum AccessMode {
 pub const NO_GC_PTRS: usize = 0;
 pub const PINNED: usize = 1;
 pub const VISITED: usize = 2;
-pub const HAS_SHADOW: usize = 3;
-pub const FINALIZATION_ORDERING: usize = 3;
-pub const INITIALIZED_TAG: usize = 4;
-pub const SHADOW_INITIALIZED: usize = 6;
+pub const FINALIZATION_ORDERING: usize = 4;
+pub const INITIALIZED_TAG: usize = 5;
+pub const PINNED_TAG: usize = 6;
+pub const SHADOW_INITIALIZED: usize = 7;
 pub const SHADOW_INITIALIZED_SIZE: usize = 1;
 
 pub const SIZE_TAG_POS: usize = INITIALIZED_TAG + 1;
@@ -194,17 +194,48 @@ impl SizeTag {
 }
 
 pub type VtableTag = BitField<VTABLE_TAG_SIZE, VTABLE_TAG_POS, false>;
-pub type VisitedTag = BitField<1, VISITED, false>;
+pub type VisitedTag = BitField<2, VISITED, false>;
 pub type NoHeapPtrsTag = BitField<1, NO_GC_PTRS, false>;
 pub type FinalizationOrderingTag = BitField<1, FINALIZATION_ORDERING, false>;
 pub type InitializedTag = BitField<1, INITIALIZED_TAG, false>;
+pub type PinnedTag = BitField<1, PINNED_TAG, false>;
 use crate::base::bitfield::ToAtomicBitField;
 
 pub struct ObjectHeader {
     pub bits: u64,
 }
 
+
+#[derive(Clone, Copy,PartialEq, Eq)]
+pub enum CellState {
+    Grey,
+    White,
+    Black,
+}
+
 impl ObjectHeader {
+    #[inline]
+    pub fn set_cell_state(&mut self, state: CellState) {
+        self.bits = VisitedTag::update(state as u64, self.bits);
+    }
+    #[inline]
+    pub fn cell_state(&self) -> CellState {
+        match VisitedTag::decode(self.bits) {
+            0 => CellState::White,
+            1 => CellState::Grey,
+            2 => CellState::Black,
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        }
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        PinnedTag::decode(self.bits) != 0 
+    }
+
+    pub fn set_pinned(&mut self, value: bool) {
+        self.bits = PinnedTag::update(value as u64, self.bits);
+    }
+
     pub fn is_initialized(&self) -> bool {
         InitializedTag::decode(self.bits) != 0
     }

@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use memoffset::offset_of;
 
-use crate::{memory::traits::{Allocation, Finalize, ManagedObject, Trace}, Managed, WeakRef};
+use crate::memory::traits::{Allocation, Finalize, ManagedObject, Trace};
 
 #[repr(C)]
 pub struct Array<T: Trace> {
@@ -53,7 +53,7 @@ impl<T: Trace> DerefMut for Array<T> {
     }
 }
 
-unsafe impl<T: Allocation + Trace + IsManaged> Allocation for Array<T> {
+unsafe impl<T: Allocation + Trace> Allocation for Array<T> {
     const FINALIZE: bool = T::FINALIZE;
     const LIGHT_FINALIZER: bool = {
         if T::FINALIZE {
@@ -64,8 +64,6 @@ unsafe impl<T: Allocation + Trace + IsManaged> Allocation for Array<T> {
         }
         true
     };
-    /// Array is traced if item is a managed object or item has managed objects inside it.
-    const HAS_GCPTRS: bool = T::HAS_GCPTRS || T::IS_MANAGED;
     const VARSIZE: bool = true;
     const VARSIZE_ITEM_SIZE: usize = T::SIZE;
     const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Array::<T>, length);
@@ -94,18 +92,3 @@ unsafe impl<T: Trace + Finalize> Finalize for Array<T> {
 
 impl<T: Trace + Finalize> ManagedObject for Array<T> {}
 
-pub trait IsManaged {
-    const IS_MANAGED: bool;
-}
-
-impl<T: ManagedObject + ?Sized> IsManaged for Managed<T> {
-    const IS_MANAGED: bool = true;
-}
-
-impl<T: ManagedObject + ?Sized> IsManaged for WeakRef<T> {
-    const IS_MANAGED: bool = true;
-}
-
-default impl<T> IsManaged for T {
-    const IS_MANAGED: bool = false;
-}
