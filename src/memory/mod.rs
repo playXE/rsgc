@@ -259,7 +259,7 @@ impl<T: ManagedObject + ?Sized> Managed<T> {
     }
 
     pub fn user_vtable(&self) -> *const () {
-        self.header().user_vtable()
+        self.header().vtable().user_vtable
     }
     pub fn ptr_mut(self) -> *mut u8 {
         self.ptr.as_ptr()
