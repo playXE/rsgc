@@ -243,6 +243,9 @@ pub struct Managed<T: ManagedObject + ?Sized> {
 }
 
 impl<T: ManagedObject + ?Sized> Managed<T> {
+    pub fn as_dyn(self) -> Managed<dyn ManagedObject> {
+        Managed { ptr: self.ptr, marker: PhantomData }
+    }
 
     pub fn header(&self) -> &ObjectHeader {
         unsafe { &*(self.ptr.as_ptr().sub(size_of::<ObjectHeader>()) as *const ObjectHeader) }
@@ -253,6 +256,10 @@ impl<T: ManagedObject + ?Sized> Managed<T> {
     }
     pub fn vtable(&self) -> &'static VTable {
         self.header().vtable()
+    }
+
+    pub fn user_vtable(&self) -> *const () {
+        self.header().user_vtable()
     }
     pub fn ptr_mut(self) -> *mut u8 {
         self.ptr.as_ptr()
