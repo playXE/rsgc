@@ -641,3 +641,6 @@ impl Drop for HeapRef {
         }
     }
 }
+
+unsafe impl<T: ManagedObject + ?Sized> Send for Managed<T> {}
+unsafe impl<T: ManagedObject + ?Sized> Sync for Managed<T> {}
