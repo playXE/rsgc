@@ -57,6 +57,21 @@ impl Heap {
         }))).unwrap())
     }
     
+    #[inline]
+    pub fn safepoint(&mut self) -> bool {
+        if self.needs_gc() {
+            self.collect();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn needs_gc(&self) -> bool {
+        self.pages.controller().used_bytes() > self.pages.controller().next_collection_threshold()
+    }
+    
     /// Adds core root set to heap. At the moment it is only the thread stack.
     pub fn add_core_roots(&mut self) {
         self.add_persistent_root(ThreadStackScanner);

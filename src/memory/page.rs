@@ -220,6 +220,10 @@ pub struct PageSpaceConfig {
     pub max_heap_size: Option<usize>,
     /// Sweep mode
     pub sweep_mode: SweepMode,
+    /// Enable GC on safepoints.
+    /// When this option is set to true user should manually invoke [Heap::safepoint] function periodically.
+    /// This option is useful when you want to control when GC happens.
+    pub gc_on_safepoint: bool,
 }
 
 impl Default for PageSpaceConfig {
@@ -230,6 +234,7 @@ impl Default for PageSpaceConfig {
             min_heap_size: 8 * 1024 * 1024,
             max_heap_size: None,
             sweep_mode: SweepMode::Synhcronous,
+            gc_on_safepoint: false,
         }
     }
 }
@@ -270,7 +275,7 @@ impl PageSpaceConfig {
         };
 
         config.sweep_mode = match read_string_from_env("SWEEP_MODE") {
-            Some(mode) => match mode.as_str() {
+            Some(mode) => match mode.to_lowercase().as_str() {
                 "synchronous" => SweepMode::Synhcronous,
                 "lazy" => SweepMode::Lazy,
                 "concurrent" => SweepMode::Lazy,
@@ -279,7 +284,20 @@ impl PageSpaceConfig {
             _ => SweepMode::Synhcronous,
         };
 
+        config.gc_on_safepoint = match read_string_from_env("GC_ON_SAFEPOINT") {
+            Some(mode) => match mode.to_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                _ => false,
+            },
+            _ => false,
+        };
+
         config
+    }
+
+    pub const fn gc_on_safepoint(&self) -> bool {
+        self.gc_on_safepoint
     }
 
     pub const fn sweep_mode(self) -> SweepMode {
@@ -368,6 +386,7 @@ pub struct PageSpaceController {
     pub bounded_heap_size: Option<usize>,
     pub sweep_mode: SweepMode,
     pub gc_count: usize,
+    pub gc_on_safepoint: bool,
     pub swept_at_mutator_time: usize,
 }
 
@@ -428,12 +447,22 @@ impl PageSpaceController {
             gc_count: 0,
             sweep_mode: config.sweep_mode,
             swept_at_mutator_time: 0,
+            gc_on_safepoint: config.gc_on_safepoint
         };
 
         this.set_major_threshold_from(0.0);
 
         this
     }
+
+    pub fn used_bytes(&self) -> usize {
+        self.used_bytes
+    }
+
+    pub fn next_collection_threshold(&self) -> usize {
+        self.next_collection_threshold
+    }
+    
 
     pub fn should_sweep_synchronously(&self) -> bool {
         match self.sweep_mode {
@@ -577,6 +606,7 @@ impl Pages {
             finalize_lock: false,
         }
     }
+
 
     pub fn controller(&self) -> &PageSpaceController {
         &self.controller
@@ -799,7 +829,7 @@ impl Pages {
 
     unsafe fn try_allocate_in_fresh_large_page(&mut self, size: usize) -> usize {
         if self.controller.used_bytes + LargePage::size_in_words(size) << WORD_SIZE_LOG2
-            >= self.controller.next_collection_threshold
+            >= self.controller.next_collection_threshold && !self.controller.gc_on_safepoint
         {
             return 0;
         }
@@ -855,7 +885,7 @@ impl Pages {
                 return true;
             }
         }
-        if self.controller.used_bytes + PAGE_SIZE >= self.controller.next_collection_threshold {
+        if self.controller.used_bytes + PAGE_SIZE >= self.controller.next_collection_threshold && !self.controller.gc_on_safepoint {
             return false;
         }
         let new_page = self.allocate_page(true);
