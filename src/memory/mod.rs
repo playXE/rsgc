@@ -50,10 +50,10 @@ unsafe impl Trace for ThreadStackScanner {
 
 
 impl Heap {
-    pub fn new(config: PageSpaceConfig) -> HeapRef {
+    pub fn new(config: PageSpaceConfig, external_data: *mut u8) -> HeapRef {
         HeapRef(NonNull::new(Box::into_raw(Box::new(Self {
             refs: AtomicUsize::new(1),
-            pages: Pages::new(config),
+            pages: Pages::new(config, external_data),
         }))).unwrap())
     }
     

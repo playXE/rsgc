@@ -16,6 +16,10 @@ pub trait Visitor {
     fn visit_weak_persistent_handles(&self) -> bool {
         false
     }
+
+    fn external_data(&self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
 }
 
 pub trait ObjectVisitor {

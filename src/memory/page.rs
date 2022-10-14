@@ -558,6 +558,7 @@ pub struct Pages {
     pub(crate) trace_callbacks: HashMap<u32, Box<dyn Trace>>,
     pub(crate) key: u32,
     pub(crate) max_heap_size_already_raised: bool,
+    pub(crate) external_data: *mut u8
 }
 
 struct Roots {
@@ -582,7 +583,7 @@ unsafe impl Trace for Roots {
     }
 }
 impl Pages {
-    pub fn new(config: PageSpaceConfig) -> Self {
+    pub fn new(config: PageSpaceConfig, external_data: *mut u8) -> Self {
         Self {
             current_lab: LinearAllocationBuffer::new(0, 0),
             freelist: FreeList::new(),
@@ -604,6 +605,7 @@ impl Pages {
             run_finalizers: Vec::new(),
             max_heap_size_already_raised: false,
             finalize_lock: false,
+            external_data
         }
     }
 

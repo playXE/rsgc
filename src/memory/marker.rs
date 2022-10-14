@@ -18,6 +18,7 @@ struct LocalMarker {
     num_busy: *const AtomicUsize,
     pages: *mut Pages,
     tmpstack: Vec<*mut ObjectHeader>,
+    external_data: *mut u8
 }
 
 impl LocalMarker {
@@ -147,6 +148,10 @@ impl LocalMarker {
         }
 
         impl Visitor for PendingVisitor<'_> {
+            fn external_data(&self) -> *mut u8 {
+                self.local.external_data
+            }
+
             unsafe fn visit_pointer(&mut self, object: *mut ObjectHeader) {
                 self.stack.push(object);
             }
@@ -256,6 +261,10 @@ impl Visitor for LocalMarker {
     unsafe fn visit_pointer(&mut self, object: *mut ObjectHeader) {
         self.mark_object(object);
     }
+
+    fn external_data(&self) -> *mut u8 {
+        self.external_data
+    }
 }
 
 unsafe impl Send for LocalMarker {}
@@ -296,6 +305,7 @@ impl GCMarker {
 
                 num_busy: null_mut(),
                 tmpstack: vec![],
+                external_data: unsafe { (*pages).external_data },
             };
 
             let start = std::time::Instant::now();
@@ -340,5 +350,9 @@ impl Visitor for FinalizationBumpVisitor<'_> {
 
     unsafe fn visit_pointer(&mut self, object: *mut ObjectHeader) {
         self.local.tmpstack.push(object);
+    }
+
+    fn external_data(&self) -> *mut u8 {
+        self.local.external_data
     }
 }
