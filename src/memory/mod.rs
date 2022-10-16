@@ -76,7 +76,7 @@ impl Heap {
     pub fn add_core_roots(&mut self) {
         self.add_persistent_root(ThreadStackScanner);
     }
-    pub fn add_persistent_root<T: 'static + Trace>(&mut self, root: T) -> u32 {
+    pub fn add_persistent_root<T: 'static + Trace>(&mut self, root: T) -> u64 {
         let object = Box::new(root);
 
         self.pages.trace_callbacks.insert(self.pages.key, object);
@@ -85,7 +85,7 @@ impl Heap {
         self.pages.key - 1
     }
 
-    pub fn remove_persistent_root(&mut self, key: u32) -> Option<Box<dyn Trace>> {
+    pub fn remove_persistent_root(&mut self, key: u64) -> Option<Box<dyn Trace>> {
         self.pages.trace_callbacks.remove(&key)
     }
 

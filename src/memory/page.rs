@@ -555,8 +555,8 @@ pub struct Pages {
     pub(crate) run_finalizers: Vec<*mut ObjectHeader>,
     pub(crate) weak_maps: SegmentedVec<*mut ObjectHeader>,
     pub(crate) finalize_lock: bool,
-    pub(crate) trace_callbacks: HashMap<u32, Box<dyn Trace>>,
-    pub(crate) key: u32,
+    pub(crate) trace_callbacks: HashMap<u64, Box<dyn Trace>>,
+    pub(crate) key: u64,
     pub(crate) max_heap_size_already_raised: bool,
     pub(crate) external_data: *mut u8
 }
