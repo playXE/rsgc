@@ -12,6 +12,16 @@ use crate::{
     Managed,
 };
 
+/// Collection of key/value pairs whose keys must be objects, with values of type `V` and 
+/// which does not create strong references to the keys. That is, an object's presence as a 
+/// key in a WeakMap does not prevent the object from being garbage collected.
+/// Once an object used as a key has been collected, its corresponding values in 
+/// any WeakMap become candidates for garbage collection as well — as long as they aren't strongly referred to elsewhere.
+/// 
+/// WeakMap allows associating data to objects in a way that doesn't prevent the key objects from being collected,
+/// even if the values reference the keys. However, a WeakMap doesn't allow observing the liveness of its keys, 
+/// which is why it doesn't allow enumeration; if a WeakMap exposed any method to obtain a list of its keys, 
+/// the list would depend on the state of garbage collection, introducing non-determinism.
 pub struct WeakMap<V: Trace, S: Trace = RandomState> {
     map: HashMap<*mut ObjectHeader, V, S>,
 }
@@ -22,6 +32,12 @@ impl<V: Trace, S: Trace> WeakMap<V, S> {
 
     pub fn capacity(&self) -> usize {
         self.map.capacity()
+    }
+
+    pub fn has<K: ManagedObject + ?Sized>(&self, object: Managed<K>) -> bool 
+    where S: BuildHasher
+    {
+        self.get(object).is_some()
     }
 
     pub fn set<K: ManagedObject + ?Sized>(&mut self, object: Managed<K>, value: V) -> Option<V>

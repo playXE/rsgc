@@ -101,6 +101,28 @@ const fn bucket_for_size(size: u32) -> u32 {
 }
 
 impl FreeList {
+
+    pub fn fragmentation(&self) -> f64 {
+        let mut largest = 0;
+        let mut total = 0;
+
+        unsafe {
+            for i in 0..self.biggest_free_list_index {
+                let mut current = self.free_list_heads[i];
+                while !current.is_null() {
+                    let size = (*current).heap_size();
+                    if size > largest {
+                        largest = size;
+                    }
+                    total += size;
+                    current = (*current).next();
+                }
+            }
+            println!("{} {}", largest, total);
+            1.0 - (largest as f64 / total as f64)
+        }
+    }
+
     pub const fn new() -> Self {
         Self {
             free_list_heads: [null_mut(); PAGE_SIZE_LOG2],

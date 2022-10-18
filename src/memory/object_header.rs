@@ -1,3 +1,4 @@
+
 use crate::base::bitfield::BitField;
 use crate::base::constants::*;
 use crate::memory::free_list::FreeListElement;
@@ -16,19 +17,6 @@ pub union Tid {
 pub type Word = u32;
 #[cfg(target_pointer_width = "64")]
 pub type Word = u64;
-
-/*
-bitfield! {
-    #[derive(Copy, Clone)]
-    pub struct HDR(u64);
-    #[doc = "Pointer to VTable or forwarding pointer if object is in nursery and `finalization_ordering` is set to true"]
-    Word, tid, set_tid: 63,5;
-    bool, track_young_ptrs,set_track_young_ptrs: 0;
-    bool, no_heap_ptrs,set_no_heap_ptrs: 1;
-    bool, visited,set_visited: 2;
-    bool, has_shadow,set_has_shadow: 3;
-    bool, finalization_ordering,set_finalization_ordering: 4;
-}*/
 
 #[repr(C)]
 pub struct Tracer<'a> {
@@ -53,50 +41,52 @@ impl<'a> Visitor for Tracer<'a> {
     }
 }
 
+
+/// Virtual GC table. 
+/// 
+/// Used by GC to:
+/// - Trace object properties
+/// - Finalize object
+/// - Process weak references inside object
+/// - Obtain length of variable sized objects
 #[repr(C)]
 pub struct VTable {
+    /// Statically known object size
     pub size: usize,
+    /// Is this object variable-sized?
     pub is_varsize: bool,
+    /// Tells GC how to allocate and deal with variable-sized object. Read [VarSize] documentation for more detail.
     pub varsize: VarSize,
+    /// Tells GC how to trace object properties. Read [Trace] documentation for more detail.
     pub trace: extern "C" fn(*mut (), visitor: &mut Tracer),
+    /// Tells GC how to finalize object. Read [Finalize] documentation for more detail.
     pub finalize: Option<extern "C" fn(*mut ())>,
     /// Set to true when type finalizer cannot revive object i.e when finalizer is equal to `T::drop`
     pub light_finalizer: bool,
+    /// TypeId of managed object
     pub type_id: TypeId,
+    /// Type name of managed object
     pub type_name: &'static str,
     /// Offsets of weak ref fields
     pub weak_refs: &'static [usize],
-    pub(crate) weak_map_process: Option<extern "C" fn(*mut (), &mut WeakMapProcessor)>,
+    /// Callback used to process weak references inside weak map object. 
+    pub weak_map_process: Option<extern "C" fn(*mut (), &mut WeakMapProcessor)>,
+    /// Custom user vtable.
     pub user_vtable: *const (),
 }
 
+
+/// Tells GC how to allocate and deal with variable-sized object.
 pub struct VarSize {
+    /// Size of item in a variable sized object
     pub itemsize: usize,
+    /// Offset of length field in a variable sized object. Used by GC to determine object size
     pub offset_of_length: usize,
+    /// Offset of variable part of object. Used by GC to get pointer to variable part of object
     pub offset_of_variable_part: usize,
+    /// Tells if some part of variable sized object is an managed object. Used by GC to optimzie tracing.
     pub field_might_be_object: fn(at: *mut u8) -> *mut ObjectHeader,
 }
-
-/*
-quasiconst! {
-    pub const VTABLE<T: 'static + Allocation>: &'static VTable = &VTable {
-        size: T::SIZE,
-        varsize:
-            VarSize {
-                itemsize:T::VARSIZE_ITEM_SIZE,
-                offset_of_length: T::VARSIZE_OFFSETOF_LENGTH,
-                offset_of_variable_part:T::VARSIZE_OFFSETOF_VARPART,
-                field_might_be_object: T::field_might_be_object,
-            },
-        is_varsize: T::VARSIZE,
-        trace: trace_erased::<T>,
-        finalize:if T::FINALIZE { Some(finalize_erased::<T>) } else { None },
-        light_finalizer: T::LIGHT_FINALIZER,
-        type_id: TypeId::of::<T>(),
-
-    };
-}
-*/
 
 pub trait ConstVal<T> {
     const VAL: T;
@@ -201,6 +191,14 @@ pub type InitializedTag = BitField<1, INITIALIZED_TAG, false>;
 pub type PinnedTag = BitField<1, PINNED_TAG, false>;
 use crate::base::bitfield::ToAtomicBitField;
 
+/// ObjectHeader contains meta data per object and is prepended to each
+/// object.
+/// 
+/// It stores this data:
+/// - vtable: 48 bits, it is a pointer to [VTable].
+/// - visited tag: 1 bit that indicates wheter object is marked  or not.
+/// - no heap pointers tag: 1 bit that indicates wheter object contains heap pointers or not.
+/// - finalization ordering tag: 1 bit that indicates wheter object is in finalization queue or not.
 pub struct ObjectHeader {
     pub bits: u64,
 }

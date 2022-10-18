@@ -3,7 +3,7 @@ use super::{
     marker::GCMarker,
     object_header::{ConstVal, ObjectHeader, VTable, VT},
     object_start_bitmap::ObjectStartBitmap,
-    traits::{Allocation, Trace},
+    traits::{Allocation, Trace, PersistentRoot},
     visitor::Visitor,
 };
 use crate::base::{
@@ -15,7 +15,7 @@ use crate::base::{
 };
 use crate::base::{formatted_size, segmented_vec::SegmentedVec};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     intrinsics::unlikely,
     panic::AssertUnwindSafe,
     ptr::{self, null_mut},
@@ -108,6 +108,7 @@ impl NormalPage {
             None => ptr::null_mut(),
         }
     }
+
 }
 
 impl Deref for NormalPage {
@@ -221,7 +222,7 @@ pub struct PageSpaceConfig {
     /// Sweep mode
     pub sweep_mode: SweepMode,
     /// Enable GC on safepoints.
-    /// When this option is set to true user should manually invoke [Heap::safepoint] function periodically.
+    /// When this option is set to true user should manually invoke [Heap::safepoint](crate::memory::Heap::safepoint) function periodically.
     /// This option is useful when you want to control when GC happens.
     pub gc_on_safepoint: bool,
 }
@@ -555,23 +556,28 @@ pub struct Pages {
     pub(crate) run_finalizers: Vec<*mut ObjectHeader>,
     pub(crate) weak_maps: SegmentedVec<*mut ObjectHeader>,
     pub(crate) finalize_lock: bool,
-    pub(crate) trace_callbacks: HashMap<u64, Box<dyn Trace>>,
-    pub(crate) key: u64,
+    pub(crate) trace_callbacks: Vec<Box<dyn PersistentRoot>>,
     pub(crate) max_heap_size_already_raised: bool,
     pub(crate) external_data: *mut u8
 }
 
 struct Roots {
-    trace_callbacks: *mut HashMap<u32, Box<dyn Trace>>,
+    trace_callbacks: *mut Vec<Box<dyn PersistentRoot>>,
     finalizable: Vec<*mut ObjectHeader>,
 }
 
 unsafe impl Trace for Roots {
     fn trace(&self, visitor: &mut dyn Visitor) {
         unsafe {
-            for (_, callback) in (*self.trace_callbacks).iter_mut() {
-                callback.trace(visitor);
-            }
+            (*self.trace_callbacks).retain_mut(|root| {
+                let live = root.is_live();
+                if live {
+                    root.visit(visitor);
+                    true 
+                } else {
+                    false
+                }
+            });
         }
 
         for obj in self.finalizable.iter() {
@@ -599,8 +605,7 @@ impl Pages {
             destructible: SegmentedVec::new(),
             finalizable: SegmentedVec::new(),
             weak_refs: SegmentedVec::new(),
-            key: 0,
-            trace_callbacks: HashMap::new(),
+            trace_callbacks: Vec::with_capacity(4),
             weak_maps: SegmentedVec::new(),
             run_finalizers: Vec::new(),
             max_heap_size_already_raised: false,
@@ -609,6 +614,9 @@ impl Pages {
         }
     }
 
+    pub fn fragmentation(&self) -> f64 {
+        self.freelist.fragmentation()
+    }
 
     pub fn controller(&self) -> &PageSpaceController {
         &self.controller
@@ -1071,7 +1079,7 @@ impl Pages {
             self.replace_lab(0, 0);
         }
         let mut marker = GCMarker::new();
-        let mut callbacks = std::mem::replace(&mut self.trace_callbacks, HashMap::new());
+        let mut callbacks = std::mem::replace(&mut self.trace_callbacks, vec![]);
         let mut roots = Roots {
             finalizable: std::mem::replace(&mut self.run_finalizers, vec![]),
             trace_callbacks: &mut callbacks,

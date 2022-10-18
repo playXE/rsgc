@@ -81,6 +81,9 @@ impl<T: Trace + Finalize> DerefMut for Raw<T> {
     }
 }
 
+
+/// Managed version of [`Vec`]. Methods that reallocate simply get another
+/// parameter of type `&mut Heap` to allocate from.
 pub struct ManagedVec<T: Trace + Finalize> {
     raw: Managed<Raw<T>>,
 }

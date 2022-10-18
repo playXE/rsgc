@@ -1,9 +1,10 @@
-use std::ops::{Deref, DerefMut};
+use std::{ops::{Deref, DerefMut}, mem::MaybeUninit};
 
 use memoffset::offset_of;
 
-use crate::memory::traits::{Allocation, Finalize, ManagedObject, Trace};
+use crate::{memory::{traits::{Allocation, Finalize, ManagedObject, Trace}, Heap}, Managed};
 
+/// Immutable array of `T` values allocated on the GC heap.
 #[repr(C)]
 pub struct Array<T: Trace> {
     length: usize,
@@ -11,6 +12,14 @@ pub struct Array<T: Trace> {
 }
 
 impl<T: Trace> Array<T> {
+    pub fn as_ptr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.data.as_mut_ptr()
+    }
+
     pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.length) }
     }
@@ -26,7 +35,49 @@ impl<T: Trace> Array<T> {
     pub fn is_empty(&self) -> bool {
         self.length == 0
     }
+
+    pub unsafe fn uninit(heap: &mut Heap, length: usize) -> Managed<Array<MaybeUninit<T>>>
+    where T: Allocation + 'static
+    {
+        let ptr = heap.varsize::<Self>(length);
+
+        std::mem::transmute(ptr.assume_init())
+    }
+
+    pub fn new(heap: &mut Heap, length: usize, init: T) -> Managed<Array<T>>
+    where T: Clone + Allocation + 'static
+    {
+        unsafe {
+            let mut arr = Self::uninit(heap, length);
+
+            for i in 0..length {
+                arr.as_mut_ptr().add(i).cast::<T>().write(init.clone());
+            }
+            arr.assume_init()
+        }
+    }
+
+    pub fn new_with(heap: &mut Heap, length: usize, mut init: impl FnMut(usize) -> T) -> Managed<Array<T>>
+    where T: Allocation + 'static
+    {
+        unsafe {
+            let mut arr = Self::uninit(heap, length);
+
+            for i in 0..length {
+                arr.as_mut_ptr().add(i).cast::<T>().write(init(i));
+            }
+            arr.assume_init()
+        }
+    }
+
 }
+
+impl<T: Trace + Finalize> Managed<Array<MaybeUninit<T>>> {
+    pub unsafe fn assume_init(self) -> Managed<Array<T>> {
+        std::mem::transmute(self)
+    }
+}
+
 
 impl<T: Trace> AsRef<[T]> for Array<T> {
     fn as_ref(&self) -> &[T] {

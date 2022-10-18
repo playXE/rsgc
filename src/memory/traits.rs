@@ -6,21 +6,20 @@ use super::visitor::*;
 
 /// Trait that specifies allocation behaviour.
 pub unsafe trait Allocation: Trace + Finalize + Sized {
+    /// User defined virtual-table. Might be used by runtimes to implement some kind of virtual dispatch 
+    /// without consuming space in heap and instead use vtable slot from heap object header.
     const USER_VTABLE: *const () = null();
-
     /// If true then [T::finalize](Finalize::finalize) is invoked on the object when it is dead
     const FINALIZE: bool = core::mem::needs_drop::<Self>();
     /// If true then finalizer of this object cannot revive objects
     const LIGHT_FINALIZER: bool = Self::FINALIZE;
     /// Object statically known size.
     const SIZE: usize = core::mem::size_of::<Self>();
-
     /// If true then this object has GC pointers inside it, if false then it is not traced
     const HAS_GCPTRS: bool = true;
-
-    /// If true object first field is weakptr. Used for [WeakRef][gcwrapper::WeakRef]
+    /// If true object has weak fields inside it. [Allocation::WEAKREF_OFFSETS] is used later to properly 
+    /// break weak pointers
     const HAS_WEAKPTR: bool = false;
-
     /// Set to true when object is variably sized i.e arrays
     const VARSIZE: bool = false;
     /// Size of varsize object items
@@ -29,7 +28,7 @@ pub unsafe trait Allocation: Trace + Finalize + Sized {
     const VARSIZE_OFFSETOF_LENGTH: usize = 0;
     /// Offset of variable part in varsize object
     const VARSIZE_OFFSETOF_VARPART: usize = 0;
-
+    /// Offset of weak reference fields in an object. 
     const WEAKREF_OFFSETS: &'static [usize] = &[];
 
     #[doc(hidden)]
@@ -74,13 +73,90 @@ pub extern "C" fn trace_erased<T: Trace>(ptr: *mut (), visitor: &mut Tracer) {
     }
 }
 
+
+/// Indicates that a type can be traced by a garbage collector.
+///
+/// This doesn't necessarily mean that the type is safe to allocate in a garbage collector ([Allocation]).
+///
+/// ## Safety
+/// See the documentation of the `trace` method for more info.
+/// Essentially, this object must faithfully trace anything that
+/// could contain garbage collected pointers or other `Trace` items.
 pub unsafe trait Trace {
+    /// Trace each field in this type.
+    ///
+    /// Structures should trace each of their fields,
+    /// and collections should trace each of their elements.
+    ///
+    /// ### Safety
+    /// Some types (like `Managed`) need special actions taken when they're traced,
+    /// but those are somewhat rare and are usually already provided by the garbage collector.
+    ///
+    /// Behavior is restricted during tracing:
+    /// ## Permitted Behavior
+    /// - Reading your own memory (includes iteration)
+    ///   - Interior mutation is undefined behavior, even if you use `RefCell`
+    /// - Calling `Visitor` methods for tracing
+    /// - Panicking on unrecoverable errors
+    ///   - This should be reserved for cases where you are seriously screwed up,
+    ///       and can't fulfill your contract to trace your interior properly.
+    ///     - One example is `Managed<T>` which panics if the garbage collectors are mismatched
+    ///   - Garbage collectors may chose to [abort](std::process::abort) if they encounter a panic,
+    ///     so you should avoid doing it if possible.
+    /// ## Never Permitted Behavior
+    /// - Forgetting a element of a collection, or field of a structure
+    ///   - If you forget an element undefined behavior will result
+    ///   - This is why you should always prefer automatically derived implementations where possible.
+    ///     - With an automatically derived implementation you will never miss a field
+    /// - It is undefined behavior to mutate any of your own data.
+    /// - Calling other operations on the garbage collector (including allocations)
     fn trace(&self, visitor: &mut dyn Visitor) {
         let _ = visitor;
     }
 }
 
+/// Indicates that a type can be finalized by a garbage collector.
+/// 
+/// # Safety
+/// 
+/// See the documentation of the `finalize` method for more info.
+/// 
+/// # Ordering of finalizers (based on MiniMark from RPython)
+/// 
+/// After a collection, the GC should call the finalizers on some of the objects that have one and that have become unreachable. Basically, if there is a reference chain from an object a to an object b then it should not call the finalizer for b immediately, but just keep b alive and try again to call its finalizer after the next collection.
+///
+/// (Note that this creates rare but annoying issues as soon as the program creates chains of objects with finalizers more quickly than the rate at collections go (which is very slow). It is still unclear what the real consequences would be on programs in the wild.)
+///
+/// The basic idea fails in the presence of cycles. It’s not a good idea to keep the objects alive forever or to never call any of the finalizers. The model we came up with is that in this case, we could just call the finalizer of one of the objects in the cycle – but only, of course, if there are no other objects outside the cycle that has a finalizer and a reference to the cycle.
+///
+/// More precisely, given the graph of references between objects:
+/// ```python
+/// for each strongly connected component C of the graph:
+///    if C has at least one object with a finalizer:
+///        if there is no object outside C which has a finalizer and
+///        indirectly references the objects in C:
+///            mark one of the objects of C that has a finalizer
+///            copy C and all objects it references to the new space
+///
+/// for each marked object:
+///    detach the finalizer (so that it's not called more than once)
+///    call the finalizer
+/// ```
 pub unsafe trait Finalize {
+    /// Finalize this object. Default behaviour is to just invoke [drop_in_place](core::ptr::drop_in_place).
+    /// You can override this method to do some more complex cleanup. Finalize is not invoked if [`Allocation::FINALIZE`] is false.
+    /// 
+    /// # Safety
+    /// 
+    /// When object that implements this trait has [`Allocation::LIGHT_FINALIZER`] set to true finalizer must not:
+    /// - Panic
+    /// - Recover any GC objects and access GC references
+    /// - Calling other operations on the garbage collector (including allocations). 
+    /// 
+    /// Essentially lightly finalizeable objects must not do anything that could potentially cause GC to run and their finalizers
+    /// are mostly equal to [drop](core::ops::Drop::drop).
+    /// 
+    /// If [`Allocation::LIGHT_FINALIZER`] is false then you can do anything you want in finalizer. GC will invoke finalizers in a specific order.
     fn finalize(&mut self) {
         unsafe {
             core::ptr::drop_in_place(self);
@@ -259,4 +335,11 @@ unsafe impl<F> Trace for F where F: Fn(&mut dyn Visitor) {
     fn trace(&self, visitor: &mut dyn Visitor) {
         self(visitor);
     }
+}
+
+
+/// Persistent root is an object that will be alive as long as [is_live](PersistentRoot::is_live) returns true.
+pub trait PersistentRoot {
+    fn is_live(&self) -> bool;
+    fn visit(&mut self, visitor: &mut dyn Visitor);
 }

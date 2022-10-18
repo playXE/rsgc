@@ -12,7 +12,7 @@ use crate::base::{formatted_size, stack::{approximate_stack_pointer, stack_bound
 use self::{
     object_header::{ObjectHeader, VTable},
     page::{PageSpaceConfig, Pages},
-    traits::{Allocation, Finalize, ManagedObject, Trace},
+    traits::{Allocation, Finalize, ManagedObject, Trace, PersistentRoot},
 };
 
 //pub mod free_list_old;
@@ -47,9 +47,22 @@ unsafe impl Trace for ThreadStackScanner {
     }
 }
 
+impl PersistentRoot for ThreadStackScanner {
+    fn is_live(&self) -> bool {
+        true 
+    }
+
+    fn visit(&mut self, visitor: &mut dyn visitor::Visitor) {
+        self.trace(visitor);
+    }
+}
 
 
 impl Heap {
+    pub fn fragmentation(&self) -> f64 {
+        self.pages.fragmentation()
+    }
+
     pub fn new(config: PageSpaceConfig, external_data: *mut u8) -> HeapRef {
         HeapRef(NonNull::new(Box::into_raw(Box::new(Self {
             refs: AtomicUsize::new(1),
@@ -57,6 +70,8 @@ impl Heap {
         }))).unwrap())
     }
     
+
+    /// Checks if GC is required and triggers GC if needed. Returns true if GC was triggered.
     #[inline]
     pub fn safepoint(&mut self) -> bool {
         if self.needs_gc() {
@@ -67,6 +82,7 @@ impl Heap {
         }
     }
 
+    /// Returns true if GC is required.
     #[inline]
     pub fn needs_gc(&self) -> bool {
         self.pages.controller().used_bytes() > self.pages.controller().next_collection_threshold()
@@ -76,19 +92,12 @@ impl Heap {
     pub fn add_core_roots(&mut self) {
         self.add_persistent_root(ThreadStackScanner);
     }
-    pub fn add_persistent_root<T: 'static + Trace>(&mut self, root: T) -> u64 {
-        let object = Box::new(root);
-
-        self.pages.trace_callbacks.insert(self.pages.key, object);
-        self.pages.key += 1;
-
-        self.pages.key - 1
+    /// Adds persistent root to heap.
+    pub fn add_persistent_root<T: 'static + PersistentRoot>(&mut self, root: T) {
+        self.pages.trace_callbacks.push(Box::new(root));
     }
 
-    pub fn remove_persistent_root(&mut self, key: u64) -> Option<Box<dyn Trace>> {
-        self.pages.trace_callbacks.remove(&key)
-    }
-
+    /// Allocates object of type T on heap. Object memory is uninitialized.
     pub fn uninit<T: 'static + Allocation + ManagedObject>(&mut self) -> Managed<MaybeUninit<T>> {
         let header = self.pages.malloc_fixedsize::<T>();
         unsafe {
@@ -99,6 +108,7 @@ impl Heap {
         }
     }
 
+    /// Manual way to allocate object on the heap.
     pub unsafe fn malloc(
         &mut self,
         vtable: &'static VTable,
@@ -118,6 +128,7 @@ impl Heap {
         )
     }
 
+    /// Allocates object of type T on heap and initializes it with `value`.
     pub fn manage<T: 'static + Allocation + ManagedObject>(&mut self, value: T) -> Managed<T> {
         let header = self.pages.malloc_fixedsize::<T>();
         unsafe {
@@ -153,6 +164,7 @@ impl Heap {
         WeakRef { pointer: object }
     }
 
+    /// Adds weak-map object to the heap. 
     pub unsafe fn add_weak_map<T: Allocation + ManagedObject + ?Sized>(&mut self, mut obj: Managed<T>) {
         assert!(T::__IS_WEAKMAP, "T::__IS_WEAKMAP must be set to true");
         self.pages.weak_maps.push(obj.header_mut() as *mut ObjectHeader);
@@ -379,7 +391,13 @@ unsafe impl<T: ?Sized> Trace for WeakRefInner<T> {}
 unsafe impl<T: ?Sized> Finalize for WeakRefInner<T> {}
 impl<T: ?Sized> ManagedObject for WeakRefInner<T> {}
 
-#[repr(transparent)]
+
+/// `WeakRef` is a non-owned reference to a managed object. The allocation is accessed by calling 
+/// [upgrade](WeakRef::upgrade) on the weak pointer, which returns an [Option<Managed<T>>].
+/// 
+/// Since a weak reference does not count towards ownership, it will not prevent the value stored in the allocation from being collected,
+/// and WeakRef itself makes no guarantees about the value still being present. Thus it may return None when upgraded. 
+#[repr(transparent)] 
 pub struct WeakRef<T: ?Sized> {
     pointer: Managed<WeakRefInner<T>>,
 }
