@@ -1,0 +1,277 @@
+use std::{any::TypeId, marker::PhantomData, mem::size_of};
+
+use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry}};
+
+use super::traits::*;
+
+/// Virtual GC table.
+///
+/// Used by GC to:
+/// - Trace object properties
+/// - Finalize object
+/// - Process weak references inside object
+/// - Obtain length of variable sized objects
+#[repr(C)]
+pub struct VTable {
+    /// Statically known object size
+    pub size: usize,
+    /// Is this object variable-sized?
+    pub is_varsize: bool,
+    /// Tells GC how to allocate and deal with variable-sized object. Read [VarSize] documentation for more detail.
+    pub varsize: VarSize,
+    /// Tells GC how to trace object properties. Read [Trace] documentation for more detail.
+    pub trace: fn(*mut (), visitor: &mut dyn Visitor),
+    /// Tells GC how to finalize object. Read [Finalize] documentation for more detail.
+    pub finalize: fn(*mut ()),
+    /// Set to true when type finalizer cannot revive object i.e when finalizer is equal to `T::drop`
+    pub light_finalizer: bool,
+    /// TypeId of managed object
+    pub type_id: TypeId,
+    /// Type name of managed object
+    pub type_name: &'static str,
+    pub weak_process: fn(*mut (), &mut dyn WeakProcessor),
+    /// Custom user vtable.
+    pub user_vtable: *const (),
+}
+
+/// Tells GC how to allocate and deal with variable-sized object.
+pub struct VarSize {
+    /// Size of item in a variable sized object
+    pub itemsize: usize,
+    /// Offset of length field in a variable sized object. Used by GC to determine object size
+    pub offset_of_length: usize,
+    /// Offset of variable part of object. Used by GC to get pointer to variable part of object
+    pub offset_of_variable_part: usize,
+}
+
+pub trait ConstVal<T> {
+    const VAL: T;
+}
+
+pub struct VT<T> {
+    marker: PhantomData<*const T>,
+}
+
+pub trait Allocation: Object + Sized {
+    const FINALIZE: bool = std::mem::needs_drop::<Self>();
+    const LIGHT_FINALIZER: bool = Self::FINALIZE;
+    const SIZE: usize = std::mem::size_of::<Self>();
+    const VARSIZE: bool = false;
+    const VARSIZE_ITEM_SIZE: usize = 0;
+    const VARSIZE_OFFSETOF_LENGTH: usize = 0;
+    const VARSIZE_OFFSETOF_VARPART: usize = 0;
+    const USER_VTABLE: *const () = core::ptr::null();
+}
+
+impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
+    const VAL: &'static VTable = &VTable {
+        size: T::SIZE,
+        user_vtable: T::USER_VTABLE,
+        varsize: VarSize {
+            itemsize: T::VARSIZE_ITEM_SIZE,
+            offset_of_length: T::VARSIZE_OFFSETOF_LENGTH,
+            offset_of_variable_part: T::VARSIZE_OFFSETOF_VARPART,
+        },
+        is_varsize: T::VARSIZE,
+        trace: {
+            fn erased<T: Object>(obj: *mut (), visitor: &mut dyn Visitor) {
+                unsafe {
+                    let obj = obj as *mut T;
+                    (*obj).trace(visitor);
+                }
+            }
+
+            erased::<T>
+        },
+        finalize: {
+            fn erased<T: Object>(obj: *mut ()) {
+                unsafe {
+                    let obj = obj as *mut T;
+                    (*obj).finalize();
+                }
+            }
+            erased::<T>
+        },
+        light_finalizer: T::LIGHT_FINALIZER,
+        type_id: TypeId::of::<T>(),
+        type_name: std::any::type_name::<T>(),
+        weak_process: {
+            fn erased<T: Object>(obj: *mut (), processor: &mut dyn WeakProcessor) {
+                let obj = unsafe { &mut *(obj as *mut T) };
+                obj.process_weak(processor);
+            }
+
+            erased::<T>
+        },
+    };
+}
+
+pub const NO_GC_PTRS: usize = 0;
+pub const VISITED: usize = 1;
+pub const FINALIZATION_ORDERING: usize = 2;
+
+
+pub const SIZE_TAG_POS: usize = FINALIZATION_ORDERING + 1;
+pub const SIZE_TAG_SIZE: usize = 13;
+pub const VTABLE_TAG_POS: usize = SIZE_TAG_POS + SIZE_TAG_SIZE;
+pub const VTABLE_TAG_SIZE: usize = 48;
+
+pub type SizeBits = BitField<SIZE_TAG_SIZE, SIZE_TAG_POS, false>;
+
+pub struct SizeTag;
+
+impl SizeTag {
+    pub const MAX_SIZE_TAG_IN_UNITS_OF_ALIGNMENT: u64 = ((1 << SIZE_TAG_SIZE as u64) - 1);
+    pub const MAX_SIZE_TAG: u64 = Self::MAX_SIZE_TAG_IN_UNITS_OF_ALIGNMENT * 16 as u64;
+    #[inline]
+    pub fn decode(tag: u64) -> usize {
+        Self::tag_value_to_size(SizeBits::decode(tag))
+    }
+    #[inline]
+    pub fn encode(size: usize) -> u64 {
+        SizeBits::encode(Self::size_to_tag_value(size))
+    }
+    #[inline]
+    pub fn update(tag: u64, size: usize) -> u64 {
+        SizeBits::update(Self::size_to_tag_value(size), tag)
+    }
+    #[inline]
+    fn tag_value_to_size(tag: u64) -> usize {
+        (tag as usize) << 4
+    }
+    #[inline]
+    pub fn size_fits(size: usize) -> bool {
+        size <= Self::MAX_SIZE_TAG as usize
+    }
+    #[inline]
+    fn size_to_tag_value(size: usize) -> u64 {
+        if !Self::size_fits(size) {
+            0
+        } else {
+            (size as u64) >> 4
+        }
+    }
+}
+
+pub type VtableTag = BitField<VTABLE_TAG_SIZE, VTABLE_TAG_POS, false>;
+pub type VisitedTag = BitField<1, VISITED, false>;
+pub type NoHeapPtrsTag = BitField<1, NO_GC_PTRS, false>;
+pub type FinalizationOrderingTag = BitField<1, FINALIZATION_ORDERING, false>;
+
+/// ObjectHeader contains meta data per object and is prepended to each
+/// object.
+///
+/// It stores this data:
+/// - vtable: 48 bits, it is a pointer to [VTable].
+/// - visited tag: 1 bit that indicates wheter object is marked or not.
+/// - no heap pointers tag: 1 bit that indicates wheter object contains heap pointers or not.
+/// - finalization ordering tag: 1 bit that indicates wheter object is in finalization queue or not.
+pub struct HeapObjectHeader {
+    pub word: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CellState {
+    Grey,
+    White,
+    Black,
+}
+
+impl HeapObjectHeader {
+    #[inline]
+    pub fn no_heap_ptrs(&self) -> bool {
+        NoHeapPtrsTag::decode(self.word) != 0
+    }
+    #[inline]
+    pub fn set_no_heap_ptrs(&mut self) {
+        self.word = NoHeapPtrsTag::update(1, self.word);
+    }
+    #[inline]
+    pub fn finalization_ordering(&self) -> bool {
+        FinalizationOrderingTag::decode(self.word) != 0
+    }
+    #[inline]
+    pub fn set_finalization_ordering(&mut self, value: bool) {
+        self.word = FinalizationOrderingTag::update(value as u64, self.word);
+    }
+
+    #[inline]
+    pub fn vtable(&self) -> &'static VTable {
+        unsafe {
+            let value = VtableTag::decode(self.word);
+            std::mem::transmute::<usize, &'static VTable>(value as usize)
+        }
+    }
+
+    #[inline]
+    pub fn is_free(&self) -> bool {
+        VtableTag::decode(self.word) == 0
+    }
+    #[inline]
+    pub fn set_heap_size(&mut self, size: usize) {
+        self.word = SizeTag::update(self.word, size);
+    }
+    pub fn heap_size(&self) -> usize {
+        let tags = self.word;
+
+        let result = SizeTag::decode(tags);
+        if result != 0 {
+            return result;
+        }
+
+        unsafe { self.heap_size_from_vtable(tags) }
+    }
+    #[inline]
+    pub fn set_vtable(&mut self, vt: usize) {
+        self.word = VtableTag::update(vt as _, self.word);
+    }
+
+    pub unsafe fn heap_size_from_vtable(&self, tags: u64) -> usize {
+        let vt = VtableTag::decode(tags);
+        if vt == 0 {
+            let entry = self as *const Self as *const Entry;
+            unsafe {
+                return (*entry).heap_size();
+            }
+        }
+        let vt = std::mem::transmute::<usize, &'static VTable>(vt as usize);
+
+        let mut result = vt.size;
+        if vt.is_varsize {
+            let data = self.data();
+            result +=
+                data.add(vt.varsize.offset_of_length).cast::<usize>().read() * vt.varsize.itemsize;
+        }
+        align_usize(result + size_of::<Self>(), 16)
+    }
+    #[inline]
+    pub fn data(&self) -> *const u8 {
+        (self as *const Self as usize + size_of::<Self>()) as _
+    }
+    #[inline]
+    pub fn data_mut(&mut self) -> *mut u8 {
+        (self as *mut Self as usize + size_of::<Self>()) as _
+    }
+
+    pub fn visit(&mut self, visitor: &mut dyn Visitor) {
+        if self.no_heap_ptrs() {
+            return;
+        }
+
+        let vt = self.vtable();
+
+        (vt.trace)(self.data() as _, visitor);
+    }
+
+    pub fn visit_pointers(&mut self, visitor: &mut dyn Visitor) -> usize {
+        self.visit(visitor);
+
+        self.heap_size()
+    }
+    #[inline]
+    pub fn contains(&self, addr: usize) -> bool {
+        let this_size = self.heap_size();
+        let this_addr = self as *const Self as usize;
+        (addr >= this_addr) && (addr < (this_addr + this_size))
+    }
+}

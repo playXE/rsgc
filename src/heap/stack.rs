@@ -1,50 +1,5 @@
-use std::{
-    mem::size_of,
-    ptr::{null, DynMetadata},
-};
+use std::ptr::null;
 
-thread_local! {
-    static STACK_BOUNDS: StackBounds = StackBounds::current_thread_stack_bounds();
-}
-
-pub fn stack_bounds() -> StackBounds {
-    STACK_BOUNDS.with(|bounds| *bounds)
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Stack {
-    stack_start: *const u8,
-}
-
-impl Stack {
-    pub fn stack_start(&self) -> *const u8 {
-        self.stack_start
-    }
-    pub fn new() -> Self {
-        Self {
-            stack_start: stack_bounds().origin,
-        }
-    }
-    pub fn is_on_stack(&self, addr: *const u8) -> bool {
-        approximate_stack_pointer().cast::<u8>() <= addr && addr <= self.stack_start
-    }
-    #[inline(never)]
-    pub fn iterate_pointers(&self, visitor: &mut dyn StackVisitor) {
-        let ptr = visitor as *mut dyn StackVisitor;
-        let mut raw = ptr.to_raw_parts();
-
-        iterate_pointers_impl(
-            self,
-            &mut raw as *mut (_, _) as _,
-            approximate_stack_pointer() as _,
-        );
-    }
-}
-
-pub fn iterate_pointers(visitor: &mut dyn StackVisitor) {
-    Stack::new().iterate_pointers(visitor);
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StackBounds {
@@ -57,7 +12,7 @@ impl StackBounds {
     pub unsafe fn new_thread_stack_bounds(thread: libc::pthread_t) -> Self {
         let origin = libc::pthread_get_stackaddr_np(thread);
         let size = libc::pthread_get_stacksize_np(thread);
-        let bound = origin.add(size);
+        let bound = origin.sub(size);
         Self {
             origin: origin.cast(),
             bound: bound.cast(),
@@ -187,56 +142,10 @@ fn thread_self() -> u64 {
     }
 }
 
-extern "C" {
-    pub fn PushAllRegistersAndIterateStack(
-        stack: &Stack,
-        vis: *mut u8,
-        callback: extern "C" fn(&Stack, *mut u8, *mut usize),
-    );
-}
 
 #[inline(never)]
 pub fn approximate_stack_pointer() -> *const *const u8 {
     let mut x: *const *const u8 = null();
     x = &x as *const *const *const u8 as *const *const u8;
     x
-}
-
-pub trait StackVisitor {
-    fn visit_pointer(&mut self, origin: *const *const u8, address: *const u8);
-}
-
-impl<F> StackVisitor for F
-where
-    F: FnMut(*const *const u8, *const u8),
-{
-    fn visit_pointer(&mut self, origin: *const *const u8, address: *const u8) {
-        (self)(origin, address);
-    }
-}
-
-#[inline(never)]
-extern "C" fn iterate_pointers_impl(stack: &Stack, visitor: *mut u8, stack_end: *mut usize) {
-    unsafe {
-        let tuple = visitor.cast::<(*mut u8, DynMetadata<dyn StackVisitor>)>();
-        let tuple = tuple.read();
-        let data = tuple.0;
-        let meta = tuple.1;
-        let visitor = std::ptr::from_raw_parts_mut::<dyn StackVisitor>(data as *mut (), meta);
-
-        let min_stack_alignment = size_of::<usize>();
-        let mut current = stack_end as *mut *mut u8;
-        assert_eq!(0, current as usize & (min_stack_alignment - 1));
-
-        while current < stack.stack_start() as *mut *mut u8 {
-            let address = current.read();
-            if address.is_null() {
-                current = current.add(1);
-                continue;
-            }
-
-            (*visitor).visit_pointer(current as *const _, address);
-            current = current.add(1);
-        }
-    }
 }

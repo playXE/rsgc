@@ -1,4 +1,4 @@
-use super::{memory_region::MemoryRegion, utils::round_down};
+use super::{memory_region::MemoryRegion};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Protection {
@@ -8,6 +8,17 @@ pub enum Protection {
     ReadExecute,
     ReadWriteExecute,
 }
+
+#[inline]
+pub const fn round_down(x: isize, n: isize) -> isize {
+    x & -n
+}
+
+#[inline]
+pub const fn round_up(x: isize, n: isize) -> isize {
+    round_down(x + n - 1, n)
+}
+
 
 pub struct VirtualMemory {
     region: MemoryRegion,
@@ -83,20 +94,23 @@ impl VirtualMemory {
         let alias = self.alias;
         self.alias.subregion(&alias, 0, new_size);
     }
+
+    pub fn dontneed_and_zero(&mut self) {
+        unsafe {
+            core::ptr::write_bytes(self.start() as *mut u8, 0, self.size());
+            VirtualMemory::dont_need(self.start() as _, self.size())
+        }
+    }
 }
 
 #[cfg(unix)]
 impl VirtualMemory {}
 
+
 #[cfg(unix)]
 mod vm {
     use std::ptr::null_mut;
-
-    use crate::base::{
-        memory_region::MemoryRegion,
-        utils::{round_down, round_up},
-    };
-
+    use super::*;
     use super::{page_size, Protection, VirtualMemory};
 
     pub unsafe fn generic_map_aligned(
@@ -349,6 +363,25 @@ mod vm {
                 );
             }
         }
+
+        pub unsafe fn will_need(address: *mut u8, size: usize) {
+            let start_address = address as usize;
+            let end_address = start_address + size;
+            let page_address = round_down(start_address as _, page_size() as _);
+
+            if libc::madvise(
+                page_address as _,
+                end_address as usize - page_address as usize,
+                libc::MADV_WILLNEED,
+            ) != 0
+            {
+                panic!(
+                    "madvise(0x{:x}, 0x{:x}, MADV_WILLNEED) failed",
+                    page_address,
+                    end_address as isize - page_address as isize
+                );
+            }
+        }
     }
 
     impl Drop for VirtualMemory {
@@ -369,6 +402,7 @@ mod vm {
         }
     }
 }
+
 
 static mut PAGE_SIZE: usize = 0;
 static mut PAGE_SIZE_BITS: usize = 0;
