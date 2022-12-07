@@ -1,16 +1,31 @@
-use std::{mem::{size_of, MaybeUninit}, ptr::null_mut, sync::atomic::{AtomicUsize, Ordering}, time::Instant};
+use std::{
+    mem::{size_of, MaybeUninit},
+    ptr::null_mut,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
 
-use crate::formatted_size;
+use crate::{
+    formatted_size,
+    object::HeapObjectHeader,
+    traits::{Visitor, WeakProcessor},
+};
 
 use super::{
     bitmap::HeapBitmap,
+    controller::ControlThread,
     free_set::RegionFreeSet,
-    region::{HeapRegion, HeapOptions},
+    region::{HeapArguments, HeapOptions, HeapRegion},
     safepoint,
+    shared_vars::SharedFlag,
     virtual_memory::{self, VirtualMemory},
-    AllocRequest, controller::ControlThread,
+    AllocRequest, concurrent_thread::ConcurrentGCThread,
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
+
+pub trait GlobalRoot {
+    fn walk(&self, visitor: &mut dyn Visitor) -> bool;
+}
 
 pub struct Heap {
     pub(crate) lock: Lock,
@@ -23,6 +38,12 @@ pub struct Heap {
     bytes_allocated_since_gc_start: AtomicUsize,
     last_cycle_end: Instant,
     controller_thread: Option<&'static mut ControlThread>,
+    progress_last_gc: SharedFlag,
+    object_start_bitmap: HeapBitmap<16>,
+
+    weak_refs: Vec<*mut HeapObjectHeader>,
+    global_roots: Vec<Box<dyn GlobalRoot>>,
+    scoped_pool: scoped_thread_pool::Pool,
 }
 
 impl Heap {
@@ -38,32 +59,10 @@ impl Heap {
         &self.opts
     }
 
-    pub fn new(
-        max_heap_size: usize,
-        min_region_size: Option<usize>,
-        max_region_size: Option<usize>,
-        region_size: Option<usize>,
-        target_num_regions: Option<usize>,
-        humongous_threshold: Option<usize>,
-        min_tlab_size: Option<usize>,
-        elastic_tlab: bool,
-        min_free_threshold: usize,
-        allocation_threshold: usize,
-    ) -> &'static mut Self {
+    pub fn new(args: HeapArguments) -> &'static mut Self {
         safepoint::init();
-        let mut opts = HeapRegion::setup_sizes(
-            max_heap_size,
-            min_region_size,
-            target_num_regions,
-            max_region_size,
-            humongous_threshold,
-            region_size,
-            elastic_tlab,
-            min_tlab_size.unwrap_or(2 * 1024),
-        );
+        let opts = HeapRegion::setup_sizes(args);
 
-        opts.min_free_threshold = min_free_threshold;
-        opts.allocation_threshold = allocation_threshold;
         let mem = VirtualMemory::allocate_aligned(
             opts.max_heap_size,
             opts.region_size_bytes,
@@ -84,6 +83,7 @@ impl Heap {
         let free_set = RegionFreeSet::new(&opts);
 
         let this = Box::leak(Box::new(Self {
+            object_start_bitmap: HeapBitmap::new(mem.start(), mem.size()),
             regions: vec![null_mut(); opts.region_count],
             regions_storage: regions_mem,
             mem,
@@ -94,6 +94,10 @@ impl Heap {
             bytes_allocated_since_gc_start: AtomicUsize::new(0),
             last_cycle_end: Instant::now(),
             controller_thread: None,
+            progress_last_gc: SharedFlag::new(),
+            weak_refs: vec![],
+            global_roots: vec![],
+            scoped_pool: scoped_thread_pool::Pool::new(opts.parallel_gc_threads),
         }));
 
         let ptr = this as *mut Heap;
@@ -114,6 +118,7 @@ impl Heap {
             HEAP = MaybeUninit::new(HeapRef(&mut *(this as *mut Self)));
 
             heap().controller_thread = Some(ControlThread::new());
+            
         }
         this
     }
@@ -122,12 +127,22 @@ impl Heap {
         self.controller_thread.as_ref().unwrap()
     }
 
+    pub fn object_start_bitmap(&self) -> &HeapBitmap<16> {
+        &self.object_start_bitmap
+    }
+
+    pub fn object_start_bitmap_mut(&mut self) -> &mut HeapBitmap<16> {
+        &mut self.object_start_bitmap
+    }
+
     pub fn increase_used(&self, bytes: usize) {
-        self.used.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        self.used
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn decrease_used(&self, bytes: usize) {
-        self.used.fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+        self.used
+            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_used(&self, bytes: usize) {
@@ -149,6 +164,10 @@ impl Heap {
             .store(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub fn request_gc(&self) {
+        self.controller_thread().handle_requested_gc();
+    }
+
     pub fn notify_mutator_alloc(&self, bytes: usize, waste: bool) {
         if !waste {
             self.increase_used(bytes);
@@ -157,7 +176,13 @@ impl Heap {
         self.increase_allocated(bytes);
     }
 
+    pub fn notify_gc_progress(&self) {
+        self.progress_last_gc.set();
+    }
 
+    pub fn notify_no_gc_progress(&self) {
+        self.progress_last_gc.unset();
+    }
 
     pub fn region_index(&self, object: *mut u8) -> usize {
         let offset = object as usize - self.mem.start();
@@ -179,73 +204,72 @@ impl Heap {
     pub fn get_region(&self, index: usize) -> *mut HeapRegion {
         self.regions[index]
     }
-    /* 
-    pub fn allocate_memory(&mut self, req: &mut AllocRequest, in_new_region: bool) -> *mut u8 {
-        self.allocate_memory_under_lock(req, in_new_region)
-    }
 
-    pub unsafe fn free_single(&mut self, addr: *mut u8, size: usize) {
+    pub fn add_global_root(&mut self, root: Box<dyn GlobalRoot>) {
         self.lock.lock();
-        self.free_set.free_single(addr, size);
+        self.global_roots.push(root);
         unsafe {
             self.lock.unlock();
         }
     }
 
-    fn allocate_memory_under_lock(
-        &mut self,
-        req: &mut AllocRequest,
-        in_new_region: bool,
-    ) -> *mut u8 {
+    pub fn add_weak_ref(&mut self, weak_ref: *mut HeapObjectHeader) {
         self.lock.lock();
-        let result = self.free_set.allocate(req, in_new_region);
+        self.weak_refs.push(weak_ref);
         unsafe {
             self.lock.unlock();
         }
-
-        result
     }
 
-    pub fn allocate_tlab(&mut self) -> (*mut u8, usize) {
-        let mut req = AllocRequest::new(self.options().min_tlab_size, self.options().min_tlab_size);
+    pub unsafe fn walk_global_roots(&mut self, vis: &mut dyn Visitor) {
+        self.global_roots.retain(|root| {
+            root.walk(vis)
+        });
+    }
 
-        // guaranteed to not allocate a humongous object here
-        let mem = self.allocate_memory(
-            &mut req, true, /* always allocate new region for TLAB if needed */
-        );
+    pub unsafe fn process_weak_refs(&mut self) {
+        struct SimpleWeakProcessor {}
 
-        if mem.is_null() {
-            return (null_mut(), 0);
-        }
-        let size;
-        if req.actual_size() > self.options().max_tlab_size {
-            // if returned block of memory is too large simply return unused memory
-            // back to free-list
-            unsafe {
-                let remainder = mem.add(self.options().max_tlab_size);
-                let remainder_size = mem.add(req.actual_size()) as usize - remainder as usize;
-                self.free_single(remainder, remainder_size);
+        impl WeakProcessor for SimpleWeakProcessor {
+            fn process(&mut self, object: *const u8) -> *const u8 {
+                let header =
+                    (object as usize - size_of::<HeapObjectHeader>()) as *const HeapObjectHeader;
+                unsafe {
+                    if (*header).is_marked() {
+                        header.add(1) as _
+                    } else {
+                        null_mut()
+                    }
+                }
             }
-            size = self.options().max_tlab_size;
-        } else if req.actual_size() < self.options().min_tlab_size {
-            // no enough memory left for TLAB creation, return null.
-            // Triggers GC
-            unsafe {
-                self.free_single(mem, req.actual_size());
-            }
-
-            return (null_mut(), 0);
-        } else {
-            // size of block lays somewhere in between of [min_tlab_size,max_tlab_size],
-            // we're happy with it and return memory to thread that requested this TLAB
-            size = req.actual_size()
         }
 
-        (mem, size)
-    }*/
+        self.weak_refs.retain(|obj| {
+            let obj = *obj;
+            if !(*obj).is_marked() {
+                return false;
+            }
+
+            let vt = (*obj).vtable();
+
+            (vt.weak_process)(obj.add(1).cast(), &mut SimpleWeakProcessor {});
+
+            true
+        })
+    }
 
     pub fn max_capacity(&self) -> usize {
         self.regions.len() * self.options().region_size_bytes
+    }
+
+    pub unsafe fn max_tlab_alloc(&self) -> usize {
+        if self.options().elastic_tlab {
+            self.options().max_tlab_size
+        } else {
+            self.free_set
+                .unsafe_peek_free()
+                .min(self.options().max_tlab_size)
+        }
     }
 
     pub fn should_start_gc(&self) -> bool {
@@ -260,13 +284,13 @@ impl Heap {
                 formatted_size(available),
                 formatted_size(threshold_available)
             );
-            return true; 
+            return true;
         }
-        
+
         let bytes_allocated = self.bytes_allocated_since_gc_start.load(Ordering::Relaxed);
 
         if bytes_allocated > threshold_bytes_allocated {
-            log::info!(target: "gc", 
+            log::info!(target: "gc",
                 "Trigger: Allocated since last cycle ({}) is larger than allocation threshold ({})",
                 formatted_size(bytes_allocated),
                 formatted_size(threshold_bytes_allocated)
@@ -283,11 +307,195 @@ impl Heap {
                     last_time_ms,
                     self.options().guaranteed_gc_interval
                 );
-                return true;    
+                return true;
             }
         }
 
         false
+    }
+
+    fn allocate_memory_under_lock(
+        &mut self,
+        req: &mut AllocRequest,
+        in_new_region: &mut bool,
+    ) -> *mut u8 {
+        self.lock.lock();
+        let mem = self.free_set.allocate(req, in_new_region);
+        unsafe {
+            self.lock.unlock();
+        }
+        mem
+    }
+
+    pub fn allocate_memory(&mut self, req: &mut AllocRequest) -> *mut u8 {
+        let mut in_new_region = false;
+        let mut result;
+
+        result = self.allocate_memory_under_lock(req, &mut in_new_region);
+
+        // Allocation failed, block until control thread reacted, then retry allocation.
+        //
+        // It might happen that one of the threads requesting allocation would unblock
+        // way later after GC happened, only to fail the second allocation, because
+        // other threads have already depleted the free storage. In this case, a better
+        // strategy is to try again, as long as GC makes progress.
+        //
+        // Then, we need to make sure the allocation was retried after at least one
+        // Full GC, which means we want to try more than 3 times.
+        let mut tries = 0;
+
+        while result.is_null() && self.progress_last_gc.is_set() {
+            tries += 1;
+            self.controller_thread().handle_alloc_failure_gc(req);
+            result = self.allocate_memory_under_lock(req, &mut in_new_region);
+        }
+
+        while result.is_null() && tries <= 3 {
+            tries += 1;
+            self.controller_thread().handle_alloc_failure_gc(req);
+            result = self.allocate_memory_under_lock(req, &mut in_new_region);
+        }
+
+        if in_new_region {
+            self.controller_thread().notify_heap_changed();
+        }
+
+        if !result.is_null() {
+            let requested = req.size();
+            let actual = req.actual_size();
+
+            assert!(
+                req.for_lab() || requested == actual,
+                "Only LAB allocations are elastic, requested {}, actual = {}",
+                formatted_size(requested),
+                formatted_size(actual)
+            );
+
+            self.notify_mutator_alloc(actual, false);
+        }
+        result
+    }
+
+    pub fn rebuild_free_set(&mut self, concurrent: bool) {
+        let _ = concurrent;
+        self.free_set.rebuild();
+    }
+
+    pub fn heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
+        for i in 0..self.num_regions() {
+            let current = self.get_region(i);
+            blk.heap_region_do(current);
+        }
+    }
+
+    pub(crate) unsafe fn trash_humongous_region_at(&self, start: *mut HeapRegion) {
+        let humongous_obj = (*start).bottom() as *mut HeapObjectHeader;
+        let sz = (*humongous_obj).heap_size();
+        let required_regions = self.options().required_regions(sz);
+
+        let mut index = (*start).index() + required_regions - 1;
+
+        for _ in 0..required_regions {
+            let region = self.get_region(index);
+            index -= 1;
+
+            (*region).make_trash();
+        }
+    }
+
+    /// Mark address as live object.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure that `addr` points to valid object.
+    pub unsafe fn mark_live(&self, addr: *mut u8) {
+        unsafe {
+            let index = self.region_index(addr);
+            let region = self.get_region(index);
+
+            if (*region).is_humongous_start() {
+                // no-op
+                return;
+            }
+
+            if (*region).is_humongous_cont() {
+                debug_assert!(
+                    false,
+                    "Humongous object should be marked as live by its start region"
+                );
+            }
+
+            let bitmap = &(*region).object_start_bitmap;
+            bitmap.set_atomic(addr as usize);
+        }
+    }
+
+    pub fn is_live(&self, addr: *mut u8) -> bool {
+        if self.mem.contains(addr as _) {
+            return false;
+        }
+        let index = self.region_index(addr);
+        let region = self.get_region(index);
+
+        unsafe {
+            if (*region).is_humongous_start() {
+                return true;
+            }
+
+            if (*region).is_humongous_cont() {
+                return true;
+            }
+
+            let bitmap = &(*region).object_start_bitmap;
+            bitmap.check_bit(addr as usize)
+        }
+    }
+
+    pub unsafe fn get_humongous_start(&self, mut r: *mut HeapRegion) -> *mut HeapRegion {
+        let mut i = (*r).index();
+
+        while !(*r).is_humongous_start() {
+            i -= 1;
+            r = self.get_region(i);
+        }
+
+        r
+    }
+
+    pub fn is_in(&self, addr: *mut u8) -> bool {
+        self.mem.contains(addr as _)
+    }
+
+    pub fn object_start(&self, addr: *mut u8) -> *mut HeapObjectHeader {
+        if !self.mem.contains(addr as _) {
+            return null_mut();
+        }
+        let index = self.region_index(addr);
+        let region = self.get_region(index);
+
+        unsafe {
+            if (*region).is_humongous_start() {
+                return (*region).bottom() as *mut HeapObjectHeader;
+            }
+
+            if (*region).is_humongous_cont() {
+                let start = self.get_humongous_start(region);
+                return (*start).bottom() as *mut HeapObjectHeader;
+            }
+
+            let bitmap = &(*region).object_start_bitmap;
+            let start = bitmap.find_object_start(addr as _);
+            start as *mut HeapObjectHeader
+        }
+    }
+
+    pub fn tlab_capacity(&self) -> usize {
+        self.free_set().capacity()
+    }
+
+    pub unsafe fn stop(&mut self) {
+        let _ = Box::from_raw(self as *mut Self);
+        log::debug!("Heap stopped");
     }
 }
 
@@ -299,7 +507,15 @@ unsafe impl Sync for HeapRef {}
 static mut HEAP: MaybeUninit<HeapRef> = MaybeUninit::uninit();
 
 pub fn heap() -> &'static mut Heap {
-    unsafe {
-        HEAP.assume_init_mut().0
+    unsafe { HEAP.assume_init_mut().0 }
+}
+
+pub trait HeapRegionClosure: Send {
+    fn heap_region_do(&self, r: *mut HeapRegion);
+}
+
+impl Drop for Heap {
+    fn drop(&mut self) {
+        self.controller_thread.as_mut().unwrap().stop();
     }
 }

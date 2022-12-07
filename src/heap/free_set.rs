@@ -14,7 +14,7 @@ use super::{
 
 pub struct RegionFreeSet {
     heap: *mut Heap,
-    mutator_free_bitmap: DynBitmap,
+    pub(crate) mutator_free_bitmap: DynBitmap,
     mutator_leftmost: usize,
     mutator_rightmost: usize,
     max: usize,
@@ -40,6 +40,11 @@ impl RegionFreeSet {
 
     pub fn decrease_used(&mut self, count: usize) {
         self.used -= count;
+    }
+
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     pub fn new(opts: &HeapOptions) -> Self {
@@ -85,6 +90,10 @@ impl RegionFreeSet {
 
     pub fn available(&self) -> usize {
         self.capacity - self.used
+    }
+
+    pub fn prepare_for_sweep(&mut self, r: *mut HeapRegion) {
+        self.capacity -= self.alloc_capacity(r);
     }
 
     pub fn is_mutator_free(&self, ix: usize) -> bool {
@@ -195,6 +204,11 @@ impl RegionFreeSet {
         if !result.is_null() {
             self.increase_used(size);
             req.set_actual_size(size);
+
+            if !req.for_lab() {
+                // this is a regular allocation, not a TLAB and regular allocations need to be identified conservatively
+                (*region).object_start_bitmap.set_bit(result as usize);
+            }
         }
 
         if result.is_null() || self.alloc_capacity(region) == 0 {
@@ -482,7 +496,7 @@ impl RegionFreeSet {
                 }
             }
 
-            let max_humongous = self.max * self.heap().options().region_size_bytes;
+            let max_humongous = max_contig * self.heap().options().region_size_bytes;
             let frag_ext = if total_free_ext > 0 {
                 100 - (100 * max_humongous / total_free_ext)
             } else {

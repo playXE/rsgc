@@ -3,14 +3,15 @@ use std::{
     collections::HashMap,
     intrinsics::unlikely,
     ptr::null_mut,
-    sync::atomic::{AtomicI8, Ordering},
+    sync::atomic::{AtomicI8, Ordering}, mem::{size_of, MaybeUninit},
 };
 
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::heap::stack::approximate_stack_pointer;
+use crate::{heap::stack::approximate_stack_pointer, object::{VTable, Allocation, HeapObjectHeader, VT, ConstVal, Handle}, traits::Object};
+use crate::heap::tlab::ThreadLocalAllocBuffer;
 
-use super::{safepoint, stack::StackBounds};
+use super::{safepoint, stack::StackBounds, heap::heap, AllocRequest, align_usize};
 
 // gc_state = 1 means the thread is doing GC or is waiting for the GC to
 //              finish.
@@ -20,7 +21,9 @@ pub const GC_STATE_WAITING: i8 = 1;
 pub const GC_STATE_SAFE: i8 = 2;
 
 pub struct ThreadInfo {
+    pub(crate) tlab: ThreadLocalAllocBuffer,
     stack: StackBounds,
+    max_tlab_size: usize,
     safepoint: *mut u8,
     last_sp: *mut u8,
     gc_state: i8,
@@ -29,11 +32,121 @@ pub struct ThreadInfo {
 }
 
 impl ThreadInfo {
-    pub fn atomic_gc_state(&self) -> &AtomicI8 {
-        unsafe { std::mem::transmute(&self.gc_state) }
+
+
+    pub fn allocate_fixed<T: 'static + Allocation>(&mut self, value: T) -> Handle<T> {
+        unsafe {
+            let size = align_usize(T::SIZE + size_of::<HeapObjectHeader>(), 16);
+            let mem = self.allocate_raw(size);
+            let obj = mem as *mut HeapObjectHeader;
+            (*obj).word = 0;
+            (*obj).set_vtable(VT::<T>::VAL as *const VTable as _);
+            (*obj).set_heap_size(size);
+            (*obj).clear_marked();
+            (*obj).set_finalization_ordering(false);
+            
+            obj.add(1).cast::<T>().write(value);
+
+            Handle::from_raw(obj.add(1).cast())
+        }
     }
 
-    
+    pub fn allocate_varsize<T: 'static + Allocation>(&mut self, length: usize) -> Handle<MaybeUninit<T>> {
+        unsafe {
+            let size = align_usize(T::SIZE + size_of::<HeapObjectHeader>() + T::VARSIZE_ITEM_SIZE * length, 16);
+            let mem = self.allocate_raw(size);
+            let obj = mem as *mut HeapObjectHeader;
+            (*obj).word = 0;
+            (*obj).set_vtable(VT::<T>::VAL as *const VTable as _);
+            (*obj).set_heap_size(size);
+            (*obj).clear_marked();
+            (*obj).set_finalization_ordering(false);
+            
+            obj.add(1).cast::<u8>().add(T::VARSIZE_OFFSETOF_LENGTH).cast::<usize>().write(length);
+
+            Handle::from_raw(obj.add(1).cast())
+        }
+    }
+
+    #[inline]
+    pub unsafe fn allocate_raw(&mut self, size: usize) -> *mut u8 {
+        let mem = self.alloc_inside_tlab_fast(size);
+        if !mem.is_null() {
+            return mem;
+        }
+
+        self.allocate_slow(size)
+    }
+
+    #[cold]
+    unsafe fn allocate_slow(&mut self, size: usize) -> *mut u8 {
+        if size > self.max_tlab_size {
+            self.allocate_outside_tlab(size)
+        } else {
+            let mem = self.alloc_inside_tlab_slow(size);
+            if mem.is_null() {
+                self.allocate_outside_tlab(size)
+            } else {
+                mem
+            }
+        }
+    }
+
+    unsafe fn allocate_outside_tlab(&mut self, size: usize) -> *mut u8 {
+        let mut req = AllocRequest::new(super::AllocType::Shared, size, size);
+
+        let mem = heap().allocate_memory(&mut req);
+
+        mem 
+    }
+
+    unsafe fn alloc_inside_tlab_fast(&mut self, size: usize) -> *mut u8 {
+        self.tlab.allocate(size)
+    }
+
+    unsafe fn alloc_inside_tlab_slow(&mut self, size: usize) -> *mut u8 {
+        self.tlab.retire();
+
+        let tlab_size = self.max_tlab_size;
+        let mut req = AllocRequest::new(super::AllocType::ForLAB, tlab_size, tlab_size);
+        let mem = heap().allocate_memory(&mut req);
+
+        if mem.is_null() {
+            return null_mut();
+        }
+
+        core::ptr::write_bytes(mem, 0, req.actual_size());
+
+        self.tlab.initialize_(mem as _, mem.add(size) as _, mem.add(req.actual_size()) as _);
+        (*self.tlab.bitmap).set_atomic(mem as _);
+        mem
+    }
+
+
+    #[cold]
+    pub(crate) fn register(&mut self) {
+        self.safepoint = safepoint::SAFEPOINT_PAGE.load(Ordering::Relaxed);
+        assert_ne!(self.safepoint, null_mut());
+        self.stack = StackBounds::current_thread_stack_bounds();
+        self.last_sp = approximate_stack_pointer() as _;
+        acquire_threads().push(self as *mut Self);
+
+        for _ in 0..3 {
+            self.safepoint();
+        }
+
+        let heap = heap();
+
+        self.max_tlab_size = if heap.options().tlab_size > 0 {
+            heap.options().tlab_size // TLAB size set by user
+        } else {
+            heap.options().max_tlab_size // TLAB size set automatically based on heap options
+        };
+    }
+
+    pub fn atomic_gc_state(&self) -> &AtomicI8 {
+        unsafe { std::mem::transmute(&self.gc_state) }
+    }    
 
     #[inline]
     pub(crate) fn gc_state_set(&mut self, state: i8, old_state: i8) -> i8 {
@@ -55,6 +168,16 @@ impl ThreadInfo {
     }
 
 
+    #[inline]
+    pub fn stack_start(&self) -> *mut u8 {
+        self.stack.origin
+    }
+
+    #[inline]
+    pub fn last_sp(&self) -> *mut u8 {
+        self.last_sp
+    }
+
     /// Reads from polling page. If safepoint is disabled nothing happens
     /// but when safepoint is enabled this triggers page fault (SIGSEGV/SIGBUS on Linux/macOS/BSD)
     /// and goes into signal to suspend thread. 
@@ -63,10 +186,22 @@ impl ThreadInfo {
         std::sync::atomic::compiler_fence(Ordering::SeqCst);
         let safepoint = self.safepoint;
         let val = unsafe {
-            safepoint.read_volatile();
+            safepoint.read_volatile()
         };
         let _ = val;
+        #[cfg(feature="conditional-safepoint")]
+        {
+            if val != 0 {
+                self.enter_conditional();
+            }
+        }
         std::sync::atomic::compiler_fence(Ordering::SeqCst);
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn enter_conditional(&mut self) {
+        self.enter_safepoint(approximate_stack_pointer() as _);
     }
 
     /// Sets last stack pointer for a thread, waits for safepoint to be disabled and executes
@@ -101,18 +236,7 @@ impl ThreadInfo {
         self.atomic_gc_state().store(state, Ordering::Release);
     }
 
-    #[cold]
-    pub(crate) fn register(&mut self) {
-        self.safepoint = safepoint::SAFEPOINT_PAGE.load(Ordering::Relaxed);
-        assert_ne!(self.safepoint, null_mut());
-        self.stack = StackBounds::current_thread_stack_bounds();
-        self.last_sp = approximate_stack_pointer() as _;
-        acquire_threads().push(self as *mut Self);
-
-        for _ in 0..3 {
-            self.safepoint();
-        }
-    }
+    
 
     /// Adds tasks that will get executed when thread reaches safepoint.
     ///
@@ -204,9 +328,11 @@ impl Drop for SafeScope {
 thread_local! {
     static THREAD: UnsafeCell<ThreadInfo> = UnsafeCell::new(
         ThreadInfo {
+            tlab: ThreadLocalAllocBuffer::new(),
             stack: StackBounds::current_thread_stack_bounds(),
             safepoint: null_mut(),
             last_sp: null_mut(),
+            max_tlab_size: 0,
             gc_state: 0,
             safepoint_tasks: HashMap::new(),
             free_keys: vec![],

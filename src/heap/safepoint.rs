@@ -31,6 +31,7 @@ pub fn enable() {
     }
 
     let pageaddr = SAFEPOINT_PAGE.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature="conditional-safepoint"))]
     unsafe {
         #[cfg(not(windows))]
         {
@@ -51,6 +52,10 @@ pub fn enable() {
             );
         }
     }
+    #[cfg(feature="conditional-safepoint")]
+    unsafe {
+        pageaddr.write(1);
+    }
 }
 pub fn disable() {
     if SAFEPOINT_ENABLE_CNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1 != 0 {
@@ -59,6 +64,7 @@ pub fn disable() {
 
     let pageaddr = SAFEPOINT_PAGE.load(std::sync::atomic::Ordering::Relaxed);
 
+    #[cfg(not(feature="conditional-safepoint"))]
     unsafe {
         #[cfg(not(windows))]
         {
@@ -79,6 +85,11 @@ pub fn disable() {
             );
         }
     }
+
+    #[cfg(feature="conditional-safepoint")]
+    unsafe {
+        pageaddr.write(0);
+    }
 }
 
 pub fn init() {
@@ -87,10 +98,10 @@ pub fn init() {
         let mut addr;
         cfg_if::cfg_if! {
             if #[cfg(windows)] {
-                addr = VirtualProtect(core::ptr::null_mut(), pgsz, MEM_COMMIT, PAGE_READONLY) as *mut u8;
+                addr = VirtualProtect(core::ptr::null_mut(), pgsz, MEM_COMMIT, if cfg!(feature="conditional-safepoint") { PAGE_READWRITE } else { PAGE_READONLY }) as *mut u8;
                 addr = addr;
             } else {
-                addr = libc::mmap(null_mut(), pgsz, libc::PROT_READ, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) as *mut u8;
+                addr = libc::mmap(null_mut(), pgsz, if cfg!(feature="conditional-safepoint") { libc::PROT_WRITE | libc::PROT_READ } else { libc::PROT_READ }, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) as *mut u8;
                 if addr == libc::MAP_FAILED as *mut u8 {
                     addr = null_mut();
                 }

@@ -624,6 +624,7 @@ impl Condvar {
         let result;
         let mut bad_mutex = false;
         let mut requeued = false;
+        let safe_scope = SafeScope::new(unsafe { thread_no_register() } );
         {
             let addr = self as *const _ as usize;
             let lock_addr = mutex as *const _ as *mut _;
@@ -682,6 +683,8 @@ impl Condvar {
         } else {
             mutex.lock(safepoint);
         }
+
+        drop(safe_scope);
 
         WaitTimeoutResult(!(result.is_unparked() || requeued))
     }

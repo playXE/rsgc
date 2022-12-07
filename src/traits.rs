@@ -22,3 +22,20 @@ pub trait Visitor {
 pub trait WeakProcessor {
     fn process(&mut self, object: *const u8) -> *const u8;
 }
+
+macro_rules! impl_simple {
+    ($($t: ty)*) => {
+        $(
+            impl Object for $t {}
+            impl $crate::object::Allocation for $t {}
+        )*
+    };
+}
+
+impl_simple!(
+    bool 
+    f32 f64 
+    u8 u16 u32 u64 u128
+    i8 i16 i32 i64 i128 
+    isize usize 
+);

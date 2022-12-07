@@ -2,8 +2,9 @@ use core::fmt;
 use std::{mem::size_of, ptr::null_mut, time::Instant};
 
 use crate::{formatted_size, env::read_uint_from_env};
+use crate::heap::heap::heap;
 
-use super::{align_down, free_list::FreeList, bitmap::HeapBitmap};
+use super::{align_down, free_list::FreeList, bitmap::HeapBitmap, virtual_memory};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum RegionState {
@@ -37,15 +38,13 @@ pub struct HeapRegion {
     typ: RegionState,
     index: usize,
     used: usize,
+    pub(crate) object_start_bitmap: HeapBitmap<16>,
     /// Start of region memory
     begin: *mut u8,
     /// End of region memory
     end: *mut u8,
-    /// If this region is regular, points to non-null pointer.
-    /// 
-    /// Used for conservative marking and dealing with interior pointers.
-    object_start_bitmap: HeapBitmap<16>,
-    free_list: FreeList,
+    pub(crate) free_list: FreeList,
+    pub(crate) largest_free_list_entry: usize
 }
 
 pub struct HeapArguments {
@@ -56,28 +55,52 @@ pub struct HeapArguments {
     pub region_size: usize,
     pub elastic_tlab: bool,
     pub min_tlab_size: usize,
-    pub max_tlab_size: usize,
+    pub tlab_size: usize,
+    pub tlab_waste_target_percent: usize,
+    pub tlab_refill_waste_fraction: usize,
+    pub tlab_waste_increment: usize,
     pub max_heap_size: usize,
     pub min_free_threshold: usize,
     pub allocation_threshold: usize,
     pub guaranteed_gc_interval: usize,
     pub control_interval_min: usize,
     pub control_interval_max: usize,
-    pub control_interval_adjust_period: usize
+    pub control_interval_adjust_period: usize,
+    pub uncommit: bool,
+    pub uncommit_delay: usize,
+    /// How many regions to process at once during parallel region 
+    /// iteration. Affects heaps with lots of regions.
+    pub parallel_region_stride: usize,
+    pub parallel_gc_threads: usize,
 }
 
 impl Default for HeapArguments {
     fn default() -> Self {
-        /*Self {
-            min_region_size: 0,
-            max_region_size: 0,
+        Self {
+            min_region_size: virtual_memory::page_size(),
+            max_region_size: 32 * 1024 * 1024,
             target_num_regions: 2048,
             humongous_threshold: 100,
             region_size: 0,
             elastic_tlab: false,
-        }*/
+            min_free_threshold: 10,
+            allocation_threshold: 10,
+            guaranteed_gc_interval: 5 * 60 * 1000,
+            uncommit: true,
+            uncommit_delay: 5 * 60 * 1000,
+            control_interval_min: 1,
+            control_interval_max: 10,
+            control_interval_adjust_period: 1000,
+            min_tlab_size: 2 * 1024,
+            max_heap_size: 96 * 1024 * 1024,
 
-        todo!()
+            tlab_refill_waste_fraction: 64,
+            tlab_size: 4 * 1024,
+            tlab_waste_increment: 4,
+            tlab_waste_target_percent: 1,
+            parallel_region_stride: 1024,
+            parallel_gc_threads: 4,
+        }
     }
 }
 
@@ -96,6 +119,7 @@ pub struct HeapOptions {
     pub humongous_threshold_bytes: usize,
     pub max_heap_size: usize,
     pub max_tlab_size: usize,
+    pub tlab_size: usize,
     pub min_tlab_size: usize,
     pub region_size_log2: usize,
     pub elastic_tlab: bool,
@@ -104,7 +128,12 @@ pub struct HeapOptions {
     pub guaranteed_gc_interval: usize,
     pub control_interval_min: usize,
     pub control_interval_max: usize,
-    pub control_interval_adjust_period: usize
+    pub control_interval_adjust_period: usize,
+    pub uncommit: bool,
+    pub uncommit_delay: usize,
+    pub target_refills: usize,
+    pub parallel_gc_threads: usize,
+    pub parallel_region_stride: usize,
 }
 
 impl HeapOptions {
@@ -134,13 +163,14 @@ impl HeapRegion {
     pub unsafe fn new(loc: usize, index: usize, start: usize, opts: &HeapOptions) -> *mut Self {
         let p = loc as *mut Self;
         p.write(Self {
-            typ: RegionState::EmptyUncommited,
-            object_start_bitmap: HeapBitmap::empty(),
+            typ: RegionState::EmptyCommited,
             begin: start as *mut u8,
             index,
             used: 0,    
+            object_start_bitmap: HeapBitmap::new(start, opts.region_size_bytes),
             end: (start + opts.region_size_bytes) as *mut u8,
-            free_list: FreeList::new(opts)
+            free_list: FreeList::new(opts),
+            largest_free_list_entry: 0,
         });
 
         (*p).recycle();
@@ -151,10 +181,12 @@ impl HeapRegion {
     pub fn allocate(&mut self, size: usize) -> *mut u8 {
         unsafe {
             let (result, sz) = self.free_list.allocate(size);
-
+            
             if result.is_null() {
                 return null_mut();
             }
+
+            self.make_regular_allocation();
             if sz > size {
                 let remainder = result.add(size);
                 let remainder_size = result.add(sz) as usize - remainder as usize;
@@ -164,6 +196,10 @@ impl HeapRegion {
 
             result
         }
+    }
+
+    pub fn make_regular_allocation(&mut self) {
+        self.typ = RegionState::Regular;
     }
 
     pub fn used(&self) -> usize {
@@ -198,14 +234,6 @@ impl HeapRegion {
         self.used = bytes;
     }
 
-    pub fn object_start_bitmap(&self) -> &HeapBitmap<16> {
-        &self.object_start_bitmap 
-    }
-
-    pub fn object_start_bitmap_mut(&mut self) -> &mut HeapBitmap<16> {
-        &mut self.object_start_bitmap 
-    }
-
     pub fn contains(&self, ptr: *mut u8) -> bool {
         ptr >= self.begin && ptr < self.end 
     }
@@ -237,10 +265,18 @@ impl HeapRegion {
         self.make_empty();
         self.object_start_bitmap.clear();
         self.used = 0;
-
+        self.largest_free_list_entry = self.size();
         unsafe { self.free_list.add(self.bottom() as _, self.size()); }
     }
 
+    pub fn largest_free_list_entry(&self) -> usize {
+        self.largest_free_list_entry 
+    }
+
+    pub fn set_largest_free_list_entry(&mut self, size: usize) {
+        self.largest_free_list_entry = size;
+    }
+    
     pub fn make_trash(&mut self) {
         self.typ = RegionState::Trash;
     }
@@ -249,9 +285,21 @@ impl HeapRegion {
         self.typ = RegionState::EmptyCommited;
     }
 
-    pub const MIN_PAGE_SIZE: usize = 4 * 1024;
+    pub fn is_humongous_start(&self) -> bool {
+        self.typ == RegionState::HumongousStart 
+    }
+
+    pub fn is_humongous_cont(&self) -> bool {
+        self.typ == RegionState::HumongousCont 
+    }
+
+    pub fn is_regular(&self) -> bool {
+        self.typ == RegionState::Regular 
+    }
+
+    pub const MIN_REGION_SIZE: usize = 4 * 1024;
     pub const MIN_NUM_PAGES: usize = 10;
-    pub const MAX_PAGE_SIZE: usize = 32 * 1024 * 1024;
+    pub const MAX_REGION_SIZE: usize = 32 * 1024 * 1024;
 
     /// Setups heap region sizes and thresholds based on input parameters.
     /// 
@@ -260,28 +308,41 @@ impl HeapRegion {
     /// if you have humongous_threshold set to 50 and your region size is 4KB then largest object that will be allocated
     /// using free-list is 2KB, objects larger than that get a separate humongous region(s).
     pub fn setup_sizes(
-        mut max_heap_size: usize,
-        min_region_size: Option<usize>,
-        target_num_regions: Option<usize>,
-        max_region_size: Option<usize>,
-        humongous_threshold: Option<usize>,
-        region_size: Option<usize>,
-        elastic_tlab: bool,
-        min_tlab_size: usize,
+        args: HeapArguments
     ) -> HeapOptions {
         let mut opts = HeapOptions::default();
        
+        opts.target_refills = 100 / (2 * args.tlab_waste_target_percent);
+        opts.target_refills = opts.target_refills.max(2);
+        opts.tlab_size = args.tlab_size;
+        opts.uncommit = args.uncommit;
+        opts.parallel_gc_threads = args.parallel_gc_threads;
+        opts.parallel_region_stride = args.parallel_region_stride;
+        opts.allocation_threshold = args.allocation_threshold;
+        opts.min_free_threshold = args.min_free_threshold;
+        opts.control_interval_adjust_period = args.control_interval_adjust_period;
+        opts.control_interval_max = args.control_interval_max;
+        opts.control_interval_min = args.control_interval_min;
+        opts.uncommit_delay = args.uncommit_delay;
+        opts.guaranteed_gc_interval = args.guaranteed_gc_interval;
+        let min_region_size = if args.min_region_size < Self::MIN_REGION_SIZE {
+            Self::MIN_REGION_SIZE
+        } else {
+            args.min_region_size
+        };
 
-        let min_region_size = min_region_size.map(|x| {
-            if x < Self::MIN_PAGE_SIZE {
-                Self::MIN_PAGE_SIZE
-            } else {
-                x 
-            }
-        }).unwrap_or(Self::MIN_PAGE_SIZE);
+        let target_num_regions = if args.target_num_regions == 0 {
+            2048 
+        } else {
+            args.target_num_regions
+        };
+        let max_region_size = if args.max_region_size == 0 || args.max_region_size < args.min_region_size {
+            Self::MAX_REGION_SIZE
+        } else {
+            args.max_region_size
+        };
 
-        let target_num_regions = target_num_regions.unwrap_or(128);
-        let max_region_size = max_region_size.unwrap_or(Self::MAX_PAGE_SIZE);
+        let mut max_heap_size = args.max_heap_size;
 
         if min_region_size > max_heap_size / Self::MIN_NUM_PAGES {
             panic!("Max heap size ({}) is too low to afford the minimum number of regions ({}) of minimum region size ({})",
@@ -289,8 +350,8 @@ impl HeapRegion {
             );
         }
 
-        let mut region_size = if let Some(region_size) = region_size {
-            region_size
+        let mut region_size = if args.region_size != 0 {
+            args.region_size
         } else {
             let mut region_size = max_heap_size / target_num_regions;
             region_size = region_size.max(min_region_size);
@@ -314,7 +375,11 @@ impl HeapRegion {
         opts.region_size_bytes_shift = region_size_log;
         opts.region_size_words_shift = opts.region_size_bytes_shift - 3;
         opts.region_size_log2 = region_size_log;
-        let humongous_threshold = humongous_threshold.unwrap_or(50);
+        let humongous_threshold = if args.humongous_threshold == 0 {
+            100 
+        } else {
+            args.humongous_threshold
+        };
         opts.humongous_threshold_words = opts.region_size_words * humongous_threshold / 100;
         opts.humongous_threshold_words = align_down(opts.humongous_threshold_words, 8);
         opts.humongous_threshold_bytes = opts.humongous_threshold_words * size_of::<usize>();
@@ -331,9 +396,13 @@ impl HeapRegion {
         // at the same time nothing incredibly bad would not happen, each of threads would get 32M regions. 
         // But once program has to start another thread it would end up in OOMing since no free memory is left.
         opts.max_tlab_size = (opts.region_size_bytes / 8).min(opts.humongous_threshold_bytes);
-        opts.min_tlab_size = min_tlab_size;
+        opts.min_tlab_size = if args.min_tlab_size < 2 * 1024 {
+            2 * 1024
+        } else {
+            args.min_tlab_size
+        }; 
         opts.max_tlab_size = opts.min_tlab_size.max(opts.max_tlab_size);
-        opts.elastic_tlab = elastic_tlab;        
+        opts.elastic_tlab = args.elastic_tlab;   
 
         log::info!(target: "gc", "Region sizes setup complete");
         log::info!(target: "gc", "- Max heap size: {}", formatted_size(opts.max_heap_size));

@@ -9,8 +9,12 @@ pub mod safepoint;
 pub mod free_list;
 pub mod stack;
 pub mod flags;
+pub mod sweeper;
 pub mod controller;
 pub mod concurrent_thread;
+pub mod marking;
+pub mod mark_sweep;
+pub mod tlab;
 pub mod virtual_memory;
 pub mod free_set;
 

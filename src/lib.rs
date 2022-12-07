@@ -1,5 +1,5 @@
-#![feature(const_type_id, const_type_name, panic_always_abort, core_intrinsics)]
-#![allow(dead_code, unused_imports)]
+#![feature(const_type_id, const_type_name, panic_always_abort, core_intrinsics, specialization)]
+#![allow(dead_code, unused_imports, incomplete_features)]
 
 pub const MEM_KIND_DYNAMIC: i32 = 0;
 pub const MEM_KIND_RAW: i32 = 1;

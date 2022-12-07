@@ -1,4 +1,4 @@
-use std::{mem::size_of, ptr::null_mut};
+use std::{mem::size_of, ptr::null_mut, sync::atomic::{AtomicU8, Ordering}};
 
 
 pub struct HeapBitmap<const ALIGN: usize> {
@@ -15,6 +15,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     }
 
     pub const ALIGN_MASK: usize = ALIGN - 1;
+
     pub const fn bits_per_cell() -> usize {
         8 * size_of::<u8>()
     }
@@ -81,6 +82,36 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
         unsafe { *self.bmp.get_unchecked_mut(index) |= 1 << bit };
     }
 
+    pub fn cell_atomic(&self, index: usize) -> &AtomicU8 {
+        unsafe {
+            &*(self.bmp.as_ptr().add(index) as *const AtomicU8)
+        }
+    }
+
+    #[inline]
+    pub fn set_atomic(&self, addr: usize) {
+        let (index, bit) = self.object_start_index_bit(addr);
+        let cell = self.cell_atomic(index).load(Ordering::Acquire);
+
+        self.cell_atomic(index).store(cell | (1 << bit), Ordering::Release);
+    }
+
+    #[inline]
+    pub fn clear_atomic(&self, addr: usize) {
+        let (index, bit) = self.object_start_index_bit(addr);
+        let cell = self.cell_atomic(index).load(Ordering::Acquire);
+
+        self.cell_atomic(index).store(cell & !(1 << bit), Ordering::Release);
+    }
+
+    #[inline]
+    pub fn check_atomic(&self, addr: usize) -> bool {
+        let (index, bit) = self.object_start_index_bit(addr);
+        let cell = self.cell_atomic(index).load(Ordering::Acquire);
+
+        cell & (1 << bit) != 0
+    }
+
     #[inline]
     pub fn clear_bit(&mut self, addr: usize) {
         let (index, bit) = self.object_start_index_bit(addr);
@@ -119,10 +150,26 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
         }
     }
 
+    pub fn clear_range_atomic(&mut self, begin: usize, end: usize) {
+        let mut begin_offset = begin.wrapping_sub(self.offset);
+        let mut end_offset = end.wrapping_sub(self.offset);
+
+        while begin_offset < end_offset && Self::offset_index_bit(begin_offset) != 0 {
+            self.clear_atomic(self.offset + begin_offset);
+            begin_offset += ALIGN;
+        }
+
+        while begin_offset < end_offset && Self::offset_index_bit(end_offset) != 0 {
+            end_offset -= ALIGN;
+            self.clear_atomic(self.offset + end_offset);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.bmp.fill(0);
     }
 }
+
 
 pub struct CHeapBitmap {
     align: usize,

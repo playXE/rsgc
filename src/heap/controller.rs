@@ -1,8 +1,8 @@
-use std::{sync::atomic::{AtomicBool, Ordering}, time::{Instant, Duration}};
+use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Instant, Duration}};
 
 use parking_lot::{Mutex, Condvar, lock_api::RawMutex};
 
-use crate::{sync::monitor::Monitor, formatted_size};
+use crate::{sync::monitor::Monitor, formatted_size, heap::mark_sweep::MarkSweep};
 
 use super::{shared_vars::SharedFlag, concurrent_thread::ConcurrentGCThread, heap::heap, AllocRequest};
 
@@ -51,19 +51,19 @@ impl ControlThread {
         }));
 
         let ptr = thread as *mut ControlThread as usize;
-        let sync_with_child = Monitor::new(false);
-        let sync_with_child_ptr = &sync_with_child as *const Monitor<bool> as usize;
-
+        let sync_with_child = Arc::new((Mutex::new(false), Condvar::new()));
+        let sync_with_child_2 = sync_with_child.clone();
         std::thread::spawn(move || {
             unsafe {
                 {
-                    let sync_with_child_ptr = sync_with_child_ptr as *const Monitor<bool>;
-                    let sync_with_child = &*sync_with_child_ptr;
+                    let sync_with_child = sync_with_child_2;
 
                     {
-                        let mut lock = sync_with_child.lock(false);
-                        **lock = true;
-                        assert!(lock.notify());
+                        let mut lock = sync_with_child.0.lock();
+                        *lock = true;
+                        drop(lock);
+                        
+                        sync_with_child.1.notify_one();
                     }
 
                     std::mem::forget(sync_with_child);
@@ -75,12 +75,16 @@ impl ControlThread {
             }
         });
         // Wait for controller thread to be actually spawned
-        let mut lock = sync_with_child.lock(false);
-        while !**lock {
-            lock.wait();
+        let mut lock = sync_with_child.0.lock();
+        if !*lock {
+            sync_with_child.1.wait(&mut lock);
         }
 
         thread 
+    }
+
+    pub fn prepare_for_graceful_shutdown(&self) {
+        self.graceful_shutdown.set();
     }
 
     pub fn in_graceful_shutdown(&self) -> bool {
@@ -115,17 +119,19 @@ impl ControlThread {
     /// 
     pub fn notify_alloc_failure_waiters(&self) {
         self.alloc_failure_gc.unset();
-        let ml = self.alloc_failure_waiters_lock.lock(false);
-        ml.notify_all();
+        self.alloc_failure_waiters_lock.notify_all();
     }
 
     pub fn notify_gc_waiters(&self) {
         self.gc_requested.unset();
-        let ml = self.gc_waiters_lock.lock(false);
-        ml.notify_all();
+        self.gc_waiters_lock.notify_all();
     }
 
+    #[inline(never)]
     pub fn handle_requested_gc(&self) {
+        if self.gc_requested.try_set() {
+            log::info!(target: "gc", "Explicit GC request");
+        }
         let mut ml = self.gc_waiters_lock.lock(true);
         while self.gc_requested.is_set() {
             ml.wait();
@@ -156,14 +162,14 @@ impl ConcurrentGCThread for ControlThread {
             let mut mode = GCMode::None;
 
             if alloc_failure_pending {
-                log::info!("Trigger: Handle allocation failure");
+                log::info!(target: "gc", "Trigger: Handle allocation failure");
                 mode = GCMode::FullSTW;
             } else if explicit_gc_requested {
-                log::info!("Trigger: Explicit GC request");
+                log::info!(target: "gc", "Trigger: Explicit GC request");
                 mode = GCMode::FullSTW;
             } else {
                 if heap.should_start_gc() {
-                    mode = GCMode::ConcurrentSweep;
+                    mode = GCMode::FullSTW;
                 }
             }
 
@@ -182,11 +188,14 @@ impl ConcurrentGCThread for ControlThread {
 
                    
                     {
-                        // todo: GC cycle
+                        let mut ms = MarkSweep::new();
+                        ms.do_collect(mode);
+                        
                     }
 
                     // If this was the requested GC cycle, notify waiters about it
                     if explicit_gc_requested {
+                        
                         self.notify_gc_waiters();
                     }
 
@@ -218,13 +227,14 @@ impl ConcurrentGCThread for ControlThread {
                 last_sleep_adjust_time = current;
                 sleep = heap.options().control_interval_max.min(1.max(sleep * 2));
             };
-            println!("sleep for {} ms", sleep);
+   
             std::thread::sleep(Duration::from_millis(sleep as _));
         }
 
         while !self.should_terminate() {
             std::thread::yield_now();
         }
+        log::debug!(target: "gc", "Controller thread terminated");
     }
 
     fn should_terminate(&self) -> bool {
@@ -240,6 +250,7 @@ impl ConcurrentGCThread for ControlThread {
         self.stop_service();
         let mut lock = self.terminator_lock.lock();
         while !self.has_terminated.load(Ordering::Relaxed) {
+
             self.terminator_cond.wait(&mut lock);
         }
     }

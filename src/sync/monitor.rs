@@ -28,6 +28,14 @@ impl<T> Monitor<T> {
             cv: &self.cv
         })
     }
+
+    pub fn notify_all(&self) -> usize {
+        self.cv.notify_all()
+    }
+
+    pub fn notify_one(&self) -> bool {
+        self.cv.notify_one()
+    }
 }
 
 pub struct MontiroLocker<'a, T> {

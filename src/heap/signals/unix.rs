@@ -22,7 +22,7 @@ unsafe extern "C" fn segv_handler(sig: i32, info: *mut siginfo_t, context: *mut 
     // and we got here. Polling page gets protected only when safepoint is requested. 
     if safepoint::addr_in_safepoint((*info).si_addr() as usize) {
         log::trace!(target: "gc-safepoint", "{:?} reached safepoint", std::thread::current().id());
-        // blocks until safepoint is disabled.
+        // basically spin-loop that waits for safepoint to be disabled
         thread().enter_safepoint(get_sp_from_ucontext(context).cast());
         log::trace!(target: "gc-safepoint", "{:?} exit safepoint", std::thread::current().id());
         return;
@@ -49,6 +49,7 @@ unsafe fn get_sp_from_ucontext(uc: *mut ucontext_t) -> *mut () {
                 (*(*uc).uc_mcontext).__ss.__esp
             }
         } else {
+            // Darwin has the sanest ucontext_t impl, others don't so we use our own code
             approximate_stack_pointer() as _
         }
     }

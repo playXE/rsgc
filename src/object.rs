@@ -1,6 +1,7 @@
-use std::{any::TypeId, marker::PhantomData, mem::size_of};
+use core::fmt;
+use std::{any::TypeId, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::NonNull};
 
-use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry}};
+use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry, thread::ThreadInfo}};
 
 use super::traits::*;
 
@@ -62,6 +63,8 @@ pub trait Allocation: Object + Sized {
     const VARSIZE_OFFSETOF_VARPART: usize = 0;
     const USER_VTABLE: *const () = core::ptr::null();
 }
+
+
 
 impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
     const VAL: &'static VTable = &VTable {
@@ -204,6 +207,21 @@ impl HeapObjectHeader {
     }
 
     #[inline]
+    pub fn is_marked(&self) -> bool {
+        VisitedTag::decode(self.word) != 0 
+    }
+
+    #[inline]
+    pub fn clear_marked(&mut self) {
+        self.word = VisitedTag::update(0, self.word);
+    }
+
+    #[inline]
+    pub fn set_marked(&mut self) {
+        self.word = VisitedTag::update(1, self.word);
+    }
+
+    #[inline]
     pub fn is_free(&self) -> bool {
         VtableTag::decode(self.word) == 0
     }
@@ -240,7 +258,7 @@ impl HeapObjectHeader {
         if vt.is_varsize {
             let data = self.data();
             result +=
-                data.add(vt.varsize.offset_of_length).cast::<usize>().read() * vt.varsize.itemsize;
+                data.add(vt.varsize.offset_of_length).cast::<u32>().read() as usize * vt.varsize.itemsize;
         }
         align_usize(result + size_of::<Self>(), 16)
     }
@@ -274,4 +292,134 @@ impl HeapObjectHeader {
         let this_addr = self as *const Self as usize;
         (addr >= this_addr) && (addr < (this_addr + this_size))
     }
+}
+
+pub struct Handle<T: Object + ?Sized> {
+    ptr: NonNull<u8>,
+    marker: PhantomData<NonNull<T>>
+}
+
+impl<T: Object + ?Sized> Handle<T> {
+    
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr.as_ptr()
+    }
+    pub fn as_ref(&self) -> &T where T: Sized {
+        unsafe { self.ptr.cast::<T>().as_ref() }
+    }
+    pub fn as_mut(&mut self) -> &'_ mut T 
+    where T: Sized 
+    {
+        unsafe { self.ptr.cast().as_mut() }
+    }
+
+    pub unsafe fn from_raw(mem: *mut u8) -> Self {
+        Self {
+            ptr: NonNull::new_unchecked(mem),
+            marker: PhantomData
+        }
+    }
+}
+
+impl<T: Object + Sized> Handle<MaybeUninit<T>> {
+    pub unsafe fn assume_init(self) -> Handle<T> {
+        Handle {
+            ptr: self.ptr,
+            marker: PhantomData
+        }
+    }
+
+}
+
+impl<T: Object + ?Sized> Copy for Handle<T> {}
+impl<T: Object + ?Sized> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: Object + ?Sized> fmt::Pointer for Handle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f,"Handle({:p})", self.ptr)
+    }
+}
+
+impl<T: Object> Object for MaybeUninit<T> {}
+impl<T: Allocation + Object> Allocation for MaybeUninit<T> {
+    const FINALIZE: bool = T::FINALIZE;
+    const LIGHT_FINALIZER: bool = T::LIGHT_FINALIZER;
+    const SIZE: usize = T::SIZE;
+    const USER_VTABLE: *const () = T::USER_VTABLE;
+    const VARSIZE: bool = T::VARSIZE;
+    const VARSIZE_ITEM_SIZE: usize = T::VARSIZE_ITEM_SIZE;
+    const VARSIZE_OFFSETOF_LENGTH: usize = T::VARSIZE_OFFSETOF_LENGTH;
+    const VARSIZE_OFFSETOF_VARPART: usize = T::VARSIZE_OFFSETOF_VARPART;
+}
+
+#[repr(C)]
+pub struct Array<T: Object + Sized> {
+    length: u32,
+    init_length: u32,
+    data: [T; 0]
+}
+
+impl<T: 'static + Object + Sized> Array<T> {
+    pub fn new(th: &mut ThreadInfo, len: usize, mut init: impl FnMut(usize) -> T) -> Handle<Self> {
+        let mut result = th.allocate_varsize::<Self>(len);
+        let arr = result.as_mut().as_mut_ptr();
+        for i in 0..len {
+            unsafe {
+                let data = (*arr).data.as_mut_ptr().add(i);
+                data.write(init(i));
+                (*arr).init_length += 1;
+            }
+        }
+        unsafe {
+            result.assume_init()
+        }
+    }
+}
+
+impl<T: Object + ?Sized> Object for Handle<T> {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        visitor.visit(self.ptr.as_ptr());
+    }
+} 
+
+
+impl<T: Object> Object for Array<T> {
+    fn finalize(&mut self) {
+        unsafe {
+            core::ptr::drop_in_place(std::slice::from_raw_parts_mut(self.data.as_mut_ptr(), self.init_length as _));
+        }
+    }
+
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        unsafe {
+            let slice = std::slice::from_raw_parts(self.data.as_ptr(), self.init_length as _);
+
+            for val in slice {
+                val.trace(visitor);
+            }
+        }
+    }
+
+    fn process_weak(&mut self, processor: &mut dyn WeakProcessor) {
+        unsafe {
+            let slice = std::slice::from_raw_parts_mut(self.data.as_mut_ptr(), self.init_length as _);
+
+            for val in slice {
+                val.process_weak(processor);
+            }
+        }
+    }
+}
+
+impl<T: Object + Sized> Allocation for Array<T> {
+    const FINALIZE: bool = std::mem::needs_drop::<T>();
+    const LIGHT_FINALIZER: bool = true;
+    const SIZE: usize = size_of::<Self>();
+    const VARSIZE: bool = true;
+    const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
+    const VARSIZE_OFFSETOF_LENGTH: usize = 0;
+    const VARSIZE_OFFSETOF_VARPART: usize = size_of::<usize>();
 }
