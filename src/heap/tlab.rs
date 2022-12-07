@@ -1,8 +1,7 @@
 use std::ptr::null_mut;
 
-use crate::heap::bitmap::HeapBitmap;
 use super::heap::heap;
-
+use crate::{formatted_size, heap::bitmap::HeapBitmap};
 
 // ThreadLocalAllocBuffer: a descriptor for thread-local storage used by
 // the threads for allocation.
@@ -38,10 +37,11 @@ impl ThreadLocalAllocBuffer {
             // succesfull thread-local allocation
 
             self.top = obj + size;
-            unsafe { (*self.bitmap).set_atomic(obj); }
             unsafe {
-                debug_assert_eq!((*self.bitmap).find_object_start(obj) as usize, obj)
+                (*self.bitmap).set_atomic(obj);
             }
+
+            unsafe { debug_assert_eq!((*self.bitmap).find_object_start(obj) as usize, obj) }
             return obj as _;
         }
 
@@ -59,7 +59,6 @@ impl ThreadLocalAllocBuffer {
             &(*region).object_start_bitmap
         };
     }
-
 
     pub fn initialize(&mut self) {
         self.initialize_(0, 0, 0);
@@ -90,8 +89,10 @@ impl ThreadLocalAllocBuffer {
         let region_ix = heap.region_index(self.start as *mut u8);
         let region = heap.get_region(region_ix);
         if self.end - self.top != 0 {
-            (*region).free_list.add(self.top as *mut u8, self.end - self.top);
+            log::trace!(target: "gc-tlab", "Retiring TLAB for {:?}: {:p} {}", std::thread::current().id(), self.start as *mut u8, formatted_size(self.end - self.start));
+            (*region)
+                .free_list
+                .add(self.top as *mut u8, self.end - self.top);
         }
     }
 }
-

@@ -1,22 +1,23 @@
-pub mod bitmap;
-pub mod thread;
-pub mod memory_region;
-pub mod signals;
 pub mod heap;
-pub mod region;
-pub mod shared_vars;
+pub mod thread;
 pub mod safepoint;
-pub mod free_list;
-pub mod stack;
-pub mod flags;
-pub mod sweeper;
-pub mod controller;
+pub mod bitmap;
 pub mod concurrent_thread;
-pub mod marking;
-pub mod mark_sweep;
-pub mod tlab;
-pub mod virtual_memory;
+pub mod controller;
+pub mod free_list;
 pub mod free_set;
+pub mod region;
+pub mod mark_sweep;
+pub mod memory_region;
+pub mod marking;
+pub mod virtual_memory;
+pub mod sweeper;
+pub mod stack;
+pub mod shared_vars;
+pub mod signals;
+pub mod tlab;
+pub mod immix;
+
 
 #[inline(always)]
 pub const fn align_down(addr: usize, align: usize) -> usize {

@@ -171,6 +171,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
 }
 
 
+/// Bitmap that allows to mark objects with arbitrary alignment in a heap. 
 pub struct CHeapBitmap {
     align: usize,
     offset: usize,
@@ -268,7 +269,6 @@ impl CHeapBitmap {
     pub fn object_start_index_bit(&self, addr: usize) -> (usize, usize) {
         let object_offset = addr.wrapping_sub(self.offset);
         let object_start_number = object_offset / self.align;
-        println!("region {:x} {} {}", addr, object_offset, object_start_number);
 
         (
             object_start_number / Self::bits_per_cell(),
@@ -341,5 +341,23 @@ impl<const ALIGN: usize> HeapBytemap<ALIGN> {
             end_offset -= ALIGN;
             self.set_byte(self.offset + end_offset, 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_cheap_bitmap() {
+        let heap = vec![0u8; 4 * 1024 * 1024].into_boxed_slice();
+        let heap_ptr = heap.as_ptr() as usize;
+
+        let mut bmp1 = super::CHeapBitmap::new(256, heap_ptr, heap.len());
+
+        bmp1.set_bit(heap_ptr + 24);
+        bmp1.set_bit(heap_ptr + 512);
+        assert!(bmp1.check_bit(heap_ptr));
+        assert!(bmp1.check_bit(heap_ptr + 512));
+        assert!(!bmp1.check_bit(heap_ptr + 256));
+
     }
 }

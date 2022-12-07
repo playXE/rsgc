@@ -160,6 +160,7 @@ pub fn wait_gc() {
     }
 }
 
+/* 
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -223,3 +224,4 @@ mod tests {
         }
     }
 }
+*/

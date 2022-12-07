@@ -44,7 +44,8 @@ pub struct HeapRegion {
     /// End of region memory
     end: *mut u8,
     pub(crate) free_list: FreeList,
-    pub(crate) largest_free_list_entry: usize
+    pub(crate) largest_free_list_entry: usize,
+    pub(crate) last_sweep_free: usize,
 }
 
 pub struct HeapArguments {
@@ -95,7 +96,7 @@ impl Default for HeapArguments {
             max_heap_size: 96 * 1024 * 1024,
 
             tlab_refill_waste_fraction: 64,
-            tlab_size: 4 * 1024,
+            tlab_size: 0,
             tlab_waste_increment: 4,
             tlab_waste_target_percent: 1,
             parallel_region_stride: 1024,
@@ -160,9 +161,15 @@ impl fmt::Display for HeapOptions {
 }
 
 impl HeapRegion {
+
+    pub fn end(&self) -> usize {
+        self.end as _
+    }
+    
     pub unsafe fn new(loc: usize, index: usize, start: usize, opts: &HeapOptions) -> *mut Self {
         let p = loc as *mut Self;
         p.write(Self {
+            last_sweep_free: 0,
             typ: RegionState::EmptyCommited,
             begin: start as *mut u8,
             index,
@@ -191,8 +198,11 @@ impl HeapRegion {
                 let remainder = result.add(size);
                 let remainder_size = result.add(sz) as usize - remainder as usize;
                 self.free_list.add(remainder, remainder_size);
+                self.used += sz - remainder_size;
+            } else {
+                self.used += sz;
             }
-            self.used += size;
+            
 
             result
         }

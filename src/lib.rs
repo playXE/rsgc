@@ -1,6 +1,8 @@
 #![feature(const_type_id, const_type_name, panic_always_abort, core_intrinsics, specialization)]
 #![allow(dead_code, unused_imports, incomplete_features)]
 
+use std::{sync::atomic::AtomicPtr, cell::UnsafeCell};
+
 pub const MEM_KIND_DYNAMIC: i32 = 0;
 pub const MEM_KIND_RAW: i32 = 1;
 pub const MEM_KIND_NOPTR: i32 = 2;
@@ -59,4 +61,13 @@ impl std::fmt::Debug for FormattedSize {
 
 pub fn formatted_size(size: usize) -> FormattedSize {
     FormattedSize { size }
+}
+
+static mut SINK: usize = 0;
+
+pub fn force_on_stack<T>(val: *const T) {
+    unsafe {
+        core::ptr::write_volatile(&mut SINK, val as usize);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
 }

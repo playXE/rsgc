@@ -8,7 +8,7 @@ use std::{
 
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::{heap::stack::approximate_stack_pointer, object::{VTable, Allocation, HeapObjectHeader, VT, ConstVal, Handle}, traits::Object};
+use crate::{heap::stack::approximate_stack_pointer, object::{VTable, Allocation, HeapObjectHeader, VT, ConstVal, Handle}, traits::Object, formatted_size};
 use crate::heap::tlab::ThreadLocalAllocBuffer;
 
 use super::{safepoint, stack::StackBounds, heap::heap, AllocRequest, align_usize};
@@ -85,6 +85,7 @@ impl ThreadInfo {
         } else {
             let mem = self.alloc_inside_tlab_slow(size);
             if mem.is_null() {
+                
                 self.allocate_outside_tlab(size)
             } else {
                 mem
@@ -96,6 +97,11 @@ impl ThreadInfo {
         let mut req = AllocRequest::new(super::AllocType::Shared, size, size);
 
         let mem = heap().allocate_memory(&mut req);
+        
+        
+        if mem.is_null() {
+            std::panic::panic_any(OOM(size));
+        }
 
         mem 
     }
@@ -142,6 +148,8 @@ impl ThreadInfo {
         } else {
             heap.options().max_tlab_size // TLAB size set automatically based on heap options
         };
+
+        
     }
 
     pub fn atomic_gc_state(&self) -> &AtomicI8 {
@@ -386,3 +394,5 @@ pub(crate) unsafe fn wait_for_the_world<'a>() -> MutexGuard<'a, Vec<*mut ThreadI
 
     threads
 }
+
+pub struct OOM(pub usize);

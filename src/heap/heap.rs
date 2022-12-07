@@ -13,13 +13,14 @@ use crate::{
 
 use super::{
     bitmap::HeapBitmap,
+    concurrent_thread::ConcurrentGCThread,
     controller::ControlThread,
     free_set::RegionFreeSet,
     region::{HeapArguments, HeapOptions, HeapRegion},
     safepoint,
     shared_vars::SharedFlag,
     virtual_memory::{self, VirtualMemory},
-    AllocRequest, concurrent_thread::ConcurrentGCThread,
+    AllocRequest,
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 
@@ -118,7 +119,6 @@ impl Heap {
             HEAP = MaybeUninit::new(HeapRef(&mut *(this as *mut Self)));
 
             heap().controller_thread = Some(ControlThread::new());
-            
         }
         this
     }
@@ -222,9 +222,7 @@ impl Heap {
     }
 
     pub unsafe fn walk_global_roots(&mut self, vis: &mut dyn Visitor) {
-        self.global_roots.retain(|root| {
-            root.walk(vis)
-        });
+        self.global_roots.retain(|root| root.walk(vis));
     }
 
     pub unsafe fn process_weak_refs(&mut self) {
@@ -353,6 +351,7 @@ impl Heap {
         while result.is_null() && tries <= 3 {
             tries += 1;
             self.controller_thread().handle_alloc_failure_gc(req);
+           
             result = self.allocate_memory_under_lock(req, &mut in_new_region);
         }
 
@@ -385,6 +384,20 @@ impl Heap {
         for i in 0..self.num_regions() {
             let current = self.get_region(i);
             blk.heap_region_do(current);
+        }
+    }
+
+    pub fn parallel_heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
+        if self.num_regions() > self.options().parallel_region_stride {
+            let task = ParallelHeapRegionTask {
+                blk,
+                index: AtomicUsize::new(0),
+            };
+            self.scoped_pool.scoped(move |scope| {
+                task.work(scope);
+            });
+        } else {
+            self.heap_region_iterate(blk);
         }
     }
 
@@ -510,12 +523,45 @@ pub fn heap() -> &'static mut Heap {
     unsafe { HEAP.assume_init_mut().0 }
 }
 
-pub trait HeapRegionClosure: Send {
+pub trait HeapRegionClosure: Send + Sync {
     fn heap_region_do(&self, r: *mut HeapRegion);
 }
 
 impl Drop for Heap {
     fn drop(&mut self) {
         self.controller_thread.as_mut().unwrap().stop();
+    }
+}
+
+pub struct ParallelHeapRegionTask<'a> {
+    blk: &'a dyn HeapRegionClosure,
+    index: AtomicUsize,
+}
+
+unsafe impl<'a> Send for ParallelHeapRegionTask<'a> {}
+unsafe impl<'a> Sync for ParallelHeapRegionTask<'a> {}
+
+impl<'a> ParallelHeapRegionTask<'a> {
+    pub fn work<'b>(self, scope: &'b scoped_thread_pool::Scope<'a>) {
+        let heap = heap();
+        let stride = heap.options().parallel_region_stride;
+
+        let max = heap.num_regions();
+        while self.index.load(Ordering::Relaxed) < max {
+            let cur = self.index.fetch_add(stride, Ordering::Relaxed);
+            let start = cur;
+            let end = max.min(cur + stride);
+
+            if start >= max {
+                break;
+            }
+            scope.execute(move || {
+                let heap = super::heap::heap();
+                for i in cur..end {
+                    let region = heap.get_region(i);
+                    self.blk.heap_region_do(region);
+                }
+            });
+        }
     }
 }

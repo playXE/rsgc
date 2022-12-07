@@ -1,4 +1,4 @@
-use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Instant, Duration}};
+use std::{sync::{atomic::{AtomicBool, Ordering, AtomicUsize}, Arc}, time::{Instant, Duration}};
 
 use parking_lot::{Mutex, Condvar, lock_api::RawMutex};
 
@@ -25,6 +25,7 @@ pub struct ControlThread {
     alloc_failure_gc: SharedFlag,
     graceful_shutdown: SharedFlag,
     heap_changed: SharedFlag,
+    gc_id: AtomicUsize,
 
     terminator_cond: Condvar,
     terminator_lock: Mutex<()>,
@@ -45,7 +46,7 @@ impl ControlThread {
 
             terminator_cond: Condvar::new(),
             terminator_lock: Mutex::new(()),
-
+            gc_id: AtomicUsize::new(0),
             alloc_failure_waiters_lock: Monitor::new(()),
             gc_waiters_lock: Monitor::new(())
         }));
@@ -97,6 +98,18 @@ impl ControlThread {
         }
     }
 
+    pub fn reset_gc_id(&self) {
+        self.gc_id.store(0, Ordering::Relaxed);
+    }
+
+    pub fn update_gc_id(&self) {
+        self.gc_id.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get_gc_id(&self) -> usize {
+        self.gc_id.load(Ordering::Relaxed)
+    }
+
 
     pub fn handle_alloc_failure_gc(&self, req: &mut AllocRequest) {
         if self.alloc_failure_gc.try_set() {
@@ -119,22 +132,27 @@ impl ControlThread {
     /// 
     pub fn notify_alloc_failure_waiters(&self) {
         self.alloc_failure_gc.unset();
-        self.alloc_failure_waiters_lock.notify_all();
+        self.alloc_failure_waiters_lock.lock(false).notify_all();
     }
 
     pub fn notify_gc_waiters(&self) {
         self.gc_requested.unset();
-        self.gc_waiters_lock.notify_all();
+        self.gc_waiters_lock.lock(false).notify_all();
     }
 
     #[inline(never)]
     pub fn handle_requested_gc(&self) {
-        if self.gc_requested.try_set() {
-            log::info!(target: "gc", "Explicit GC request");
-        }
         let mut ml = self.gc_waiters_lock.lock(true);
-        while self.gc_requested.is_set() {
+
+        let mut current_gc_id = self.get_gc_id();
+        let required_gc_id = current_gc_id + 1;
+        
+        while current_gc_id < required_gc_id {
+            self.gc_requested.set();
+
             ml.wait();
+
+            current_gc_id = self.get_gc_id();
         }
     }
 }
@@ -177,7 +195,7 @@ impl ConcurrentGCThread for ControlThread {
 
             if gc_requested {
                 unsafe {
-
+                    self.update_gc_id();
                     heap.set_allocated(0);
 
                     {
@@ -227,7 +245,7 @@ impl ConcurrentGCThread for ControlThread {
                 last_sleep_adjust_time = current;
                 sleep = heap.options().control_interval_max.min(1.max(sleep * 2));
             };
-   
+            
             std::thread::sleep(Duration::from_millis(sleep as _));
         }
 
@@ -250,7 +268,6 @@ impl ConcurrentGCThread for ControlThread {
         self.stop_service();
         let mut lock = self.terminator_lock.lock();
         while !self.has_terminated.load(Ordering::Relaxed) {
-
             self.terminator_cond.wait(&mut lock);
         }
     }

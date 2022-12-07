@@ -52,12 +52,22 @@ impl<'a, T> MontiroLocker<'a, T> {
         self.cv.wait_until(&mut self.guard, timeout);
     }
 
-    pub fn notify(&self) -> bool {
-        self.cv.notify_one()
+    pub fn wait_while(&mut self, condition: impl FnMut(&mut T) -> bool) {
+        self.cv.wait_while(&mut self.guard, condition)
     }
 
-    pub fn notify_all(&self) -> usize {
-        self.cv.notify_all()
+    pub fn notify(self) -> bool {
+        unsafe { self.guard.mutex.raw().unlock_fair(); }
+        let res = self.cv.notify_one();
+        std::mem::forget(self);
+        res 
+    }
+
+    pub fn notify_all(self) -> usize {
+        unsafe { self.guard.mutex.raw().unlock_fair(); }
+        let res = self.cv.notify_all();
+        std::mem::forget(self);
+        res 
     }
 
     pub fn into_inner(self) -> MutexGuard<'a, T> {

@@ -359,7 +359,7 @@ impl<T: ?Sized> Mutex<T> {
 }
 
 pub struct MutexGuard<'a, T: ?Sized> {
-    mutex: &'a Mutex<T>,
+    pub(crate) mutex: &'a Mutex<T>,
     safepoint: bool,
 }
 
@@ -849,4 +849,10 @@ impl Condvar {
 #[inline]
 pub fn to_deadline(timeout: Duration) -> Option<Instant> {
     Instant::now().checked_add(timeout)
+}
+
+impl<'a, T: ?Sized> Drop for MutexGuard<'a, T> {
+    fn drop(&mut self) {
+        unsafe { self.mutex.raw().unlock(); }
+    }
 }

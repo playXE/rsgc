@@ -56,19 +56,20 @@ impl MarkSweep {
         };
         match mode {
             GCMode::FullSTW => {
-                self.heap.heap_region_iterate(&closure);
-                self.heap.lock.lock();
+                
+                self.heap.parallel_heap_region_iterate(&closure);
+                
+            
                 self.heap.free_set_mut().recycle_trash();
+                self.heap.lock.lock();
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
-                
             }
 
             GCMode::ConcurrentSweep => {
-                
-                self.heap.heap_region_iterate(&closure);
-                self.heap.lock.lock();
+                self.heap.parallel_heap_region_iterate(&closure);
                 self.heap.free_set_mut().recycle_trash();
+                self.heap.lock.lock();
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
             }
