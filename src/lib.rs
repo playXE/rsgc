@@ -14,7 +14,7 @@ pub const fn mem_has_ptr(p: i32) -> bool {
     (!(p & 2)) != 0
 }
 
-pub mod gc;
+//pub mod gc;
 //pub mod arena;
 //pub mod weak_random;
 pub mod env;

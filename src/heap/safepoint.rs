@@ -118,13 +118,13 @@ pub fn init() {
 }
 
 pub fn enter() -> bool {
+    assert!(!SAFEPOINT_LOCK.is_locked());
     let guard = SAFEPOINT_LOCK.lock();
 
     match GC_RUNNING.compare_exchange(0, 1, Ordering::Relaxed, Ordering::SeqCst) {
         Ok(_) => {
             enable();
             drop(guard);
-
             true
         }
 

@@ -18,7 +18,7 @@ pub struct ImmixHeap {
 }
 
 impl ImmixHeap {
-    pub fn new(args: ImmixArguments) -> &'static mut Self {
+    pub fn new(_args: ImmixArguments) -> &'static mut Self {
 
         todo!()
     }

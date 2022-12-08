@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{any::TypeId, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::NonNull};
+use std::{any::TypeId, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::NonNull, sync::atomic::AtomicU64};
 
 use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry, thread::ThreadInfo}};
 
@@ -242,6 +242,25 @@ impl HeapObjectHeader {
     #[inline]
     pub fn set_vtable(&mut self, vt: usize) {
         self.word = VtableTag::update(vt as _, self.word);
+    }
+
+    pub fn word_atomic(&self) -> &AtomicU64 {
+        unsafe {
+            std::mem::transmute(&self.word)
+        }
+    }
+
+    #[inline]
+    pub fn try_mark(&self) -> bool {
+        let word = self.word_atomic().load(std::sync::atomic::Ordering::Relaxed);
+
+        if VisitedTag::decode(word) != 0 {
+            return false;
+        }
+
+        let new_word = VisitedTag::update(1, word);
+        self.word_atomic().store(new_word, std::sync::atomic::Ordering::Relaxed);
+        true
     }
 
     pub unsafe fn heap_size_from_vtable(&self, tags: u64) -> usize {

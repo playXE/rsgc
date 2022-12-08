@@ -24,6 +24,9 @@ pub struct RegionFreeSet {
 }
 
 impl RegionFreeSet {
+    pub fn used(&self) -> usize {
+        self.used
+    }
     pub fn heap(&self) -> &mut Heap {
         unsafe { &mut *self.heap }
     }
@@ -80,6 +83,8 @@ impl RegionFreeSet {
                         continue; // do not add regions that would surely fail allocation
                     }
                     self.capacity += self.alloc_capacity(region);
+
+                    assert!(self.used <= self.capacity, "must not use more than we have");
                     self.mutator_free_bitmap.set(i, true);
                 }
             }
@@ -90,10 +95,6 @@ impl RegionFreeSet {
 
     pub fn available(&self) -> usize {
         self.capacity - self.used
-    }
-
-    pub fn prepare_for_sweep(&mut self, r: *mut HeapRegion) {
-        self.capacity -= self.alloc_capacity(r);
     }
 
     pub fn is_mutator_free(&self, ix: usize) -> bool {
@@ -133,7 +134,7 @@ impl RegionFreeSet {
     pub fn try_recycle_trashed(&mut self, r: *mut HeapRegion) {
         unsafe {
             if (*r).is_trash() {
-                self.decrease_used((*r).used());
+                //self.heap().decrease_used((*r).size());
                 (*r).recycle();
             }
         }
@@ -182,7 +183,7 @@ impl RegionFreeSet {
         let mut size = req.size();
         let result;
         if self.heap().options().elastic_tlab && req.for_lab() {
-            let free = align_down((*region).free(), 16);
+            let free = align_down((*region).peek_free(), 16);
 
             if size > free {
                 size = free;
@@ -323,8 +324,8 @@ impl RegionFreeSet {
             if index < self.max && self.is_mutator_free(index) {
                 let r = self.heap().get_region(index);
                 unsafe {
-                    if (*r).free() >= self.heap().options().min_tlab_size {
-                        return (*r).free();
+                    if (*r).peek_free() >= self.heap().options().min_tlab_size {
+                        return (*r).peek_free();
                     }
                 }
             }

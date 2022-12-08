@@ -1,147 +1,132 @@
-use std::{mem::size_of, sync::atomic::{AtomicUsize, AtomicBool, Ordering}};
+use std::sync::atomic::AtomicUsize;
 
 use rsgc::{
-    force_on_stack, formatted_size,
-    heap::{
-        heap::{heap, Heap},
-        region::HeapArguments,
-        thread::{self, ThreadInfo},
-    },
-    object::{Allocation, Array, Handle, HeapObjectHeader},
-    traits::Object,
+    heap::{thread::ThreadInfo, region::HeapArguments, heap::{Heap, heap}},
+    object::{Allocation, Handle},
+    traits::Object, env::read_uint_from_env,
 };
 
-struct Node {
-    right: Option<Handle<Node>>,
-    left: Option<Handle<Node>>,
-    val: i32,
+#[allow(dead_code)]
+pub struct TreeNode {
+    item: i64,
+    left: Option<Handle<Self>>,
+    right: Option<Handle<Self>>,
 }
 
-impl Object for Node {
+
+impl Object for TreeNode {
     fn trace(&self, visitor: &mut dyn rsgc::traits::Visitor) {
-        if let Some(ref next) = self.right {
-            next.trace(visitor);
+        if let Some(ref left) = self.left {
+            left.trace(visitor);
         }
 
-        if let Some(ref next) = self.left {
-            next.trace(visitor);
+        if let Some(ref right) = self.right {
+            right.trace(visitor);
         }
-
-        /*if PRINT_TRACE.load(Ordering::Relaxed) {
-            println!("TRACE NODE {:p} {}", self, self.val);
-        }*/
     }
 }
 
-impl Allocation for Node {}
+impl Allocation for TreeNode {}
 
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+impl TreeNode {
+    fn check_tree(&self) -> usize {
+        match (self.left, self.right) {
+            (Some(left), Some(right)) => left.as_ref().check_tree() + right.as_ref().check_tree() + 1,
+            _ => 1,
+        }
+    }
+}
 
-fn bottom_up_tree(thread: &mut ThreadInfo, depth: i32) -> Handle<Node> {
+fn create_tree(thread: &mut ThreadInfo, mut depth: i64) -> Handle<TreeNode> {
     thread.safepoint();
-    //ALLOCATED.fetch_add(size_of::<Node>() + 8, std::sync::atomic::Ordering::Relaxed);
-    if depth <= 0 {
-        return thread.allocate_fixed(Node {
-            right: None,
-            left: None,
-            val: 0,
-        });
-    }
-
-    let left = bottom_up_tree(thread, depth - 1);
-    let right = bottom_up_tree(thread, depth - 1);
-
-    thread.allocate_fixed(Node {
-        left: Some(left),
-        right: Some(right),
-        val: depth,
-    })
-}
-
-#[inline(never)]
-#[cold]
-fn tree() {
-    let _tree = bottom_up_tree(thread::thread(), 25);
-
-    //force_on_stack(&_tree);
-}
-
-#[inline(never)]
-#[cold]
-fn list(n: usize) {
-    let thread = thread::thread();
-    let mut head = thread.allocate_fixed(List {
-        next: None,
-        value: 0
+    let mut node = thread.allocate_fixed(TreeNode {
+        left: None,
+        right: None,
+        item: depth,
     });
 
-    for i in 0..n {
-        if i % 16 * 1024 == 0 {
-            thread.safepoint();
-            head = thread.allocate_fixed(List {
-                next: None,
-                value: 0
-            });
-        } else {
-            let next = thread.allocate_fixed(List {
-                next: Some(head),
-                value: head.as_ref().value + 1
-            }); 
-            head = next;
-        }
+    if depth > 0 {
+        depth -= 1;
+
+        node.as_mut().left = Some(create_tree(thread, depth));
+        node.as_mut().right = Some(create_tree(thread, depth));
     }
+
+    node
 }
 
+fn loops(iterations: i64, depth: i64) {
+    let mut check = 0;
+    let mut item = 0;
+    let th = rsgc::heap::thread::thread();
+    while {
+        th.safepoint();
+        check += create_tree(th, depth).as_ref().check_tree();
+        item += 1;
+        item < iterations
+    } {}
 
-struct List {
-    next: Option<Handle<List>>,
-    value: i64,
+    println!("{}\t trees of depth {}\t check: {}", iterations, depth, check);
 }
 
-impl Allocation for List {}
+fn trees(max_depth: i64) {
+    let long_lasting_tree = create_tree(rsgc::heap::thread::thread(), max_depth);
 
-impl Object for List {
-    fn trace(&self, visitor: &mut dyn rsgc::traits::Visitor) {
-        if let Some(ref next) = self.next {
-            next.trace(visitor);
-        }
+    let mut depth = 4;
 
-        if PRINT_TRACE.load(Ordering::Relaxed) {
-            println!("TRACE {:p} {}", self, self.value);
-        }
+    while {
+        let iterations = 16 << (max_depth - depth);
+        loops(iterations, depth);
+        depth += 2;
+        depth <= max_depth
+    } {}
+
+    println!("long lived tree of depth {}\t check: {}", max_depth, long_lasting_tree.as_ref().check_tree());
+}
+
+#[inline(never)]
+#[cold]
+fn bench() {
+    env_logger::init();
+    let mut args = HeapArguments::from_env();
+    args.parallel_mark = true;
+    args.parallel_sweep = true;
+    args.parallel_region_stride = 2048;
+    args.parallel_gc_threads = 4;
+    args.region_size = 512 * 1024;
+    args.allocation_threshold = 35;
+    let _ = Heap::new(args);
+    println!("regions: {}", heap().num_regions());
+
+    let max_depth = match read_uint_from_env("TREE_DEPTH") {
+        Some(x) if x > 6 => x,
+        _ => 21,
+    };
+
+    let start = std::time::Instant::now();
+    let stretch_depth = max_depth + 1;
+
+    {
+        println!("stretch tree of depth {}\t check: {}", stretch_depth, create_tree(rsgc::heap::thread::thread(), stretch_depth as _).as_ref().check_tree());
     }
-}
 
-static PRINT_TRACE: AtomicBool = AtomicBool::new(false);
+    trees(max_depth as _);
+
+    println!("binary trees took: {} secs", start.elapsed().as_micros() as f64 / 1000.0 / 1000.0);
+}
 
 fn main() {
-    env_logger::init();
-    
+    bench();
 
-    let mut args = HeapArguments::default();
-    args.max_heap_size = 2 * 1024 * 1024 * 1024 + 512 * 1024 * 1024;
-    args.parallel_region_stride = 256;
-    args.parallel_gc_threads = 4;
-    args.allocation_threshold = 20;
-    args.min_free_threshold = 10;
-    args.target_num_regions = 2048;
-    args.tlab_size = 4 * 1024;
-    let _ = Heap::new(args);
-    let time = std::time::Instant::now();
-    tree();
-    println!("bottom up tree in {:04} msecs", time.elapsed().as_micros() as f64 / 1000.0);
-
-    //PRINT_TRACE.store(true, Ordering::Relaxed);
-    for _ in 0..2 {
-        heap().request_gc();
+    for _ in 0..3 {
        
-    }
-    unsafe {
-        heap().stop();
+        heap().request_gc();
+        
     }
 
-    println!(
-        "allocated {}",
-        formatted_size(ALLOCATED.load(std::sync::atomic::Ordering::Relaxed))
-    );
+    let mut buf = String::new();
+    heap().print_on(&mut buf).unwrap();
+    println!("{}", buf);
+    
+    
 }

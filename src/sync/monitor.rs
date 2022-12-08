@@ -69,10 +69,6 @@ impl<'a, T> MontiroLocker<'a, T> {
         std::mem::forget(self);
         res 
     }
-
-    pub fn into_inner(self) -> MutexGuard<'a, T> {
-        self.guard
-    }
 }
 
 impl<'a, T> Deref for MontiroLocker<'a, T> {
@@ -86,5 +82,10 @@ impl<'a, T> Deref for MontiroLocker<'a, T> {
 impl<'a, T> DerefMut for MontiroLocker<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
+    }
+}
+impl<'a, T> Drop for MontiroLocker<'a, T> {
+    fn drop(&mut self) {
+        self.cv.notify_all();
     }
 }

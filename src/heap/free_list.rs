@@ -1,8 +1,12 @@
-use std::{ptr::null_mut, mem::size_of};
+use std::{mem::size_of, ptr::null_mut};
 
-use crate::{object::{HeapObjectHeader, SizeTag, VtableTag}, formatted_size};
+use crate::{
+    formatted_size,
+    heap::heap::heap,
+    object::{HeapObjectHeader, SizeTag, VtableTag},
+};
 
-use super::{region::HeapOptions, which_power_of_two, round_down_to_power_of_two32};
+use super::{region::HeapOptions, round_down_to_power_of_two32, which_power_of_two};
 
 fn bucket_index_for_size(size: usize) -> usize {
     which_power_of_two(round_down_to_power_of_two32(size as _) as _)
@@ -10,7 +14,7 @@ fn bucket_index_for_size(size: usize) -> usize {
 
 #[repr(C)]
 struct Filler {
-    hdr: HeapObjectHeader
+    hdr: HeapObjectHeader,
 }
 
 impl Filler {
@@ -41,16 +45,22 @@ impl FreeList {
             free_list_tails: free_list_tails.into_boxed_slice(),
             biggest_free_list_index: 0,
             count: 0,
-            free_bytes: 0
+            free_bytes: 0,
         }
     }
 
-    pub unsafe fn add_returning_unused_bounds(&mut self, addr: *mut u8, size: usize) -> (*mut u8, *mut u8) {
+    pub unsafe fn add_returning_unused_bounds(
+        &mut self,
+        addr: *mut u8,
+        size: usize,
+    ) -> (*mut u8, *mut u8) {
+        debug_assert!(heap().is_in(addr));
+        assert!(size != 0);
         if size < size_of::<Entry>() {
             let filler = Filler::new(addr, size);
             return (filler.add(1).cast(), filler.add(1).cast());
         }
-        
+
         let entry = Entry::as_entry(addr as _, size);
         let index = bucket_index_for_size(size);
         (*entry).link(&mut self.free_list_heads[index]);
@@ -61,6 +71,7 @@ impl FreeList {
         }
         self.count += 1;
         self.free_bytes += size;
+ 
         (entry.add(1).cast(), entry.cast::<u8>().add(size))
     }
 
@@ -86,7 +97,9 @@ impl FreeList {
         }
         self.count += other.count;
         self.free_bytes += other.free_bytes;
-        self.biggest_free_list_index = self.biggest_free_list_index.max(other.biggest_free_list_index);
+        self.biggest_free_list_index = self
+            .biggest_free_list_index
+            .max(other.biggest_free_list_index);
     }
 
     pub fn free(&self) -> usize {
@@ -106,6 +119,24 @@ impl FreeList {
         let mut index = self.biggest_free_list_index;
 
         while index > 0 {
+            debug_assert!(
+                self.is_consistent(index),
+                "unconsistent free list at index {}: {:p} {:p}: {}",
+                index,
+                self.free_list_heads[index],
+                self.free_list_tails[index],
+                if self.free_list_heads[index].is_null() {
+                    format!("tails is not null: {:p}", self.free_list_tails[index])
+                } else if self.free_list_tails[index].is_null() {
+                    format!("heads is not null: {:p}", self.free_list_heads[index])
+                } else {
+                    format!(
+                        "heads and tails are not null: {:p} {:p} but tail points to non-null next: {:p}",
+                        self.free_list_heads[index], self.free_list_tails[index],
+                        (*self.free_list_tails[index]).next
+                    )
+                }
+            );
             let entry = self.free_list_heads[index];
 
             if allocation_size > bucket_size {
@@ -136,6 +167,28 @@ impl FreeList {
         self.biggest_free_list_index = index;
         (null_mut(), 0)
     }
+
+    pub fn peek_free(&self) -> usize {
+        let index = self.biggest_free_list_index;
+
+        if index > 0 {
+            let entry = self.free_list_heads[index];
+
+            if !entry.is_null() {
+                return unsafe { (*entry).heap_size() };
+            }
+        }
+
+        0
+    }
+
+    pub fn is_consistent(&self, index: usize) -> bool {
+        (self.free_list_heads[index].is_null() && self.free_list_tails[index].is_null())
+            || (!self.free_list_heads[index].is_null()
+                && !self.free_list_tails[index].is_null()
+                && unsafe {
+                    (*self.free_list_tails[index]).next.is_null() })
+    }
 }
 
 #[repr(C)]
@@ -159,7 +212,7 @@ impl Entry {
         }
 
         (*result).next = null_mut();
-
+        assert!((*result).heap_size() != 0);
         result
     }
 
@@ -199,5 +252,4 @@ impl Entry {
         *previous_next = self.next;
         self.next = null_mut();
     }
-
 }

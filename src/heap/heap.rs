@@ -1,7 +1,7 @@
 use std::{
     mem::{size_of, MaybeUninit},
     ptr::null_mut,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Instant,
 };
 
@@ -23,6 +23,7 @@ use super::{
     AllocRequest,
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
+use scoped_thread_pool::Pool;
 
 pub trait GlobalRoot {
     fn walk(&self, visitor: &mut dyn Visitor) -> bool;
@@ -35,7 +36,10 @@ pub struct Heap {
     regions: Vec<*mut HeapRegion>,
     opts: HeapOptions,
     free_set: RegionFreeSet,
+    initial_size: usize,
+    minimum_size: usize,
     used: AtomicUsize,
+    commited: AtomicUsize,
     bytes_allocated_since_gc_start: AtomicUsize,
     last_cycle_end: Instant,
     controller_thread: Option<&'static mut ControlThread>,
@@ -60,9 +64,22 @@ impl Heap {
         &self.opts
     }
 
-    pub fn new(args: HeapArguments) -> &'static mut Self {
+    pub fn new(mut args: HeapArguments) -> &'static mut Self {
         safepoint::init();
-        let opts = HeapRegion::setup_sizes(args);
+
+        args.set_heap_size();
+        let opts = HeapRegion::setup_sizes(&args);
+
+        let init_byte_size = args.initial_heap_size;
+        let min_byte_size = args.min_heap_size;
+
+        let mut num_commited_regions = init_byte_size / opts.region_size_bytes;
+        num_commited_regions = num_commited_regions.min(opts.region_count);
+
+        let initial_size = num_commited_regions * opts.region_size_bytes;
+
+        let num_min_regions = min_byte_size / opts.region_size_bytes;
+        let minimum_size = num_min_regions * opts.region_size_bytes;
 
         let mem = VirtualMemory::allocate_aligned(
             opts.max_heap_size,
@@ -72,6 +89,14 @@ impl Heap {
             "heap",
         )
         .unwrap();
+
+        unsafe {
+            let decommit_start = mem.start() + initial_size;
+            if mem.end() - decommit_start != 0 {
+                VirtualMemory::decommit(decommit_start as _, mem.end() - decommit_start);
+                VirtualMemory::dont_need(decommit_start as _, mem.end() - decommit_start);
+            }
+        }
 
         let regions_mem = VirtualMemory::allocate_aligned(
             opts.region_count * size_of::<HeapRegion>(),
@@ -89,6 +114,9 @@ impl Heap {
             regions_storage: regions_mem,
             mem,
             opts,
+            initial_size,
+            minimum_size,
+            commited: AtomicUsize::new(initial_size),
             lock: Lock::INIT,
             free_set,
             used: AtomicUsize::new(0),
@@ -105,9 +133,10 @@ impl Heap {
         for i in 0..opts.region_count {
             let start = this.mem.start() + this.opts.region_size_bytes * i;
             let loc = this.regions_storage.start() + i * size_of::<HeapRegion>();
+            let is_commited = i < num_commited_regions;
 
             unsafe {
-                let region = HeapRegion::new(loc, i, start, &this.opts);
+                let region = HeapRegion::new(loc, i, start, &this.opts, is_commited);
                 this.regions[i] = region;
             }
         }
@@ -119,8 +148,58 @@ impl Heap {
             HEAP = MaybeUninit::new(HeapRef(&mut *(this as *mut Self)));
 
             heap().controller_thread = Some(ControlThread::new());
+            INIT.store(true, Ordering::SeqCst);
         }
         this
+    }
+
+    pub fn min_capacity(&self) -> usize {
+        self.minimum_size
+    }
+
+    pub fn entry_uncommit(&mut self, shrink_before: Instant, shrink_until: usize) {
+        // Application allocates from the beginning of the heap.
+        // It is more efficient to uncommit from the end, so that applications
+        // could enjoy the near committed regions.
+
+        let mut count = 0;
+        for i in (0..self.num_regions()).rev() {
+            let r = self.get_region(i);
+            unsafe {
+                if (*r).is_empty_commited() && (*r).empty_time() < shrink_before {
+                    self.lock.lock();
+                    if (*r).is_empty_commited() {
+                        if self.get_commited() < shrink_until + self.options().region_size_bytes {
+                            self.lock.unlock();
+                            break;
+                        }
+                    }
+
+                    (*r).do_decommit();
+                    count += 1;
+                    self.lock.unlock();
+                }
+
+                std::hint::spin_loop();
+            }
+        }
+        if count > 0 {
+            self.controller_thread().notify_heap_changed();
+        }
+    }
+
+    pub fn increase_commited(&self, bytes: usize) {
+        self.commited
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn decrease_commited(&self, bytes: usize) {
+        self.commited
+            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn get_commited(&self) -> usize {
+        self.commited.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn controller_thread<'a>(&'a self) -> &'a ControlThread {
@@ -170,7 +249,7 @@ impl Heap {
 
     pub fn notify_mutator_alloc(&self, bytes: usize, waste: bool) {
         if !waste {
-            self.increase_used(bytes);
+            //self.increase_used(bytes);
         }
 
         self.increase_allocated(bytes);
@@ -325,6 +404,10 @@ impl Heap {
         mem
     }
 
+    pub fn workers(&self) -> &Pool {
+        &self.scoped_pool
+    }
+
     pub fn allocate_memory(&mut self, req: &mut AllocRequest) -> *mut u8 {
         let mut in_new_region = false;
         let mut result;
@@ -351,7 +434,7 @@ impl Heap {
         while result.is_null() && tries <= 3 {
             tries += 1;
             self.controller_thread().handle_alloc_failure_gc(req);
-           
+
             result = self.allocate_memory_under_lock(req, &mut in_new_region);
         }
 
@@ -388,7 +471,7 @@ impl Heap {
     }
 
     pub fn parallel_heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
-        if self.num_regions() > self.options().parallel_region_stride {
+        if self.num_regions() > self.options().parallel_region_stride && self.scoped_pool.workers() != 0 {
             let task = ParallelHeapRegionTask {
                 blk,
                 index: AtomicUsize::new(0),
@@ -510,12 +593,27 @@ impl Heap {
         let _ = Box::from_raw(self as *mut Self);
         log::debug!("Heap stopped");
     }
+
+    pub fn print_on<W: std::fmt::Write>(&self, st: &mut W) -> std::fmt::Result {
+        write!(
+            st,
+            "Heap {} max, {} commited, {} x {} regions",
+            formatted_size(self.max_capacity()),
+            formatted_size(self.get_commited()),
+            self.num_regions(),
+            formatted_size(self.options().region_size_bytes)
+        )?;
+
+        Ok(())
+    }
 }
 
 struct HeapRef(&'static mut Heap);
 
 unsafe impl Send for HeapRef {}
 unsafe impl Sync for HeapRef {}
+
+static INIT: AtomicBool = AtomicBool::new(false);
 
 static mut HEAP: MaybeUninit<HeapRef> = MaybeUninit::uninit();
 

@@ -155,6 +155,33 @@ impl ControlThread {
             current_gc_id = self.get_gc_id();
         }
     }
+
+    fn service_uncommit(&mut self, shrink_before: Instant, shrink_until: usize) {
+        let heap = heap();
+
+        if heap.get_commited() <= shrink_until {
+            return;
+        }
+        // Determine if there is work to do. This avoids taking heap lock if there is
+        // no work available, avoids spamming logs with superfluous logging messages,
+        // and minimises the amount of work while locks are taken.
+
+
+        let mut has_work = false;
+        for i in 0..heap.num_regions() {
+            let r = heap.get_region(i);
+            unsafe {
+                if (*r).is_empty() && (*r).empty_time() < shrink_before {
+                    has_work = true;
+                    break;
+                }
+            }
+        }
+
+        if has_work {
+            heap.entry_uncommit(shrink_before, shrink_until);
+        }
+    }
 }
 
 
@@ -171,7 +198,14 @@ impl ConcurrentGCThread for ControlThread {
 
         let heap = heap();
         let mut last_sleep_adjust_time = Instant::now();
-        let _last_shrink_time = Instant::now();
+        let mut last_shrink_time = Instant::now();
+
+        // Shrink period avoids constantly polling regions for shrinking.
+        // Having a period 10x lower than the delay would mean we hit the
+        // shrinking with lag of less than 1/10-th of true delay.
+        // uncommit_delay is in msecs, but shrink_period is in seconds.
+        let shrink_period = heap.options().uncommit_delay as f64 / 1000.0 / 10.0;
+
         let mut sleep = heap.options().control_interval_min;
         while !self.in_graceful_shutdown() && !self.should_terminate() {
             let alloc_failure_pending = self.alloc_failure_gc.is_set();
@@ -200,12 +234,16 @@ impl ConcurrentGCThread for ControlThread {
 
                     {
                         heap.lock.lock();
+                        /*let mut buf = String::new();
+                        heap.print_on(&mut buf).unwrap();
+                        println!("{}", buf);*/
                         heap.free_set().log_status();
                         heap.lock.unlock();
                     }
 
                    
                     {
+                        
                         let mut ms = MarkSweep::new();
                         ms.do_collect(mode);
                         
@@ -224,6 +262,9 @@ impl ConcurrentGCThread for ControlThread {
 
                     {
                         heap.lock.lock();
+                        /*let mut buf = String::new();
+                        heap.print_on(&mut buf).unwrap();
+                        println!("{}", buf);*/
                         heap.free_set().log_status();
                         heap.lock.unlock();
                     }
@@ -232,10 +273,21 @@ impl ConcurrentGCThread for ControlThread {
 
             let current = std::time::Instant::now();
 
-            {
-                // todo: uncommit empty regions if threshold/time reached or explicit GC
-            }
+            if heap.options().uncommit && (explicit_gc_requested || (current - last_shrink_time).as_secs() as f64 > shrink_period) {
+                // Explicit GC tries to uncommit everything down to min capacity.
+                // Periodic uncommit tries to uncommit suitable regions down to min capacity.
 
+                let shrink_before = if explicit_gc_requested {
+                    current 
+                } else {
+                    current - Duration::from_secs(heap.options().uncommit_delay as _)
+                };
+
+                let shrink_until = heap.min_capacity();
+
+                self.service_uncommit(shrink_before, shrink_until);
+                last_shrink_time = current;
+            }
             // Wait before performing the next action. If allocation happened during this wait,
             // we exit sooner, to let heuristics re-evaluate new conditions. If we are at idle,
             // back off exponentially.

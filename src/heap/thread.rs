@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     collections::HashMap,
-    intrinsics::unlikely,
+    intrinsics::{unlikely, likely},
     ptr::null_mut,
     sync::atomic::{AtomicI8, Ordering}, mem::{size_of, MaybeUninit},
 };
@@ -33,7 +33,7 @@ pub struct ThreadInfo {
 
 impl ThreadInfo {
 
-
+    #[inline]
     pub fn allocate_fixed<T: 'static + Allocation>(&mut self, value: T) -> Handle<T> {
         unsafe {
             let size = align_usize(T::SIZE + size_of::<HeapObjectHeader>(), 16);
@@ -71,7 +71,7 @@ impl ThreadInfo {
     #[inline]
     pub unsafe fn allocate_raw(&mut self, size: usize) -> *mut u8 {
         let mem = self.alloc_inside_tlab_fast(size);
-        if !mem.is_null() {
+        if likely(!mem.is_null()) {
             return mem;
         }
 
@@ -105,7 +105,8 @@ impl ThreadInfo {
 
         mem 
     }
-
+    
+    #[inline]
     unsafe fn alloc_inside_tlab_fast(&mut self, size: usize) -> *mut u8 {
         self.tlab.allocate(size)
     }
