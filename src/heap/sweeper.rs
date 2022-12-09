@@ -107,7 +107,7 @@ impl SweepGarbageClosure {
                     if (*next_obj).is_marked() {
                         break;
                     }
-
+                    debug_assert!((*next_obj).heap_size() != 0x42 && (*next_obj).heap_size() != 0, "heap object {:p} with zero size ({:p} vt)", next_obj, (*next_obj).vtable());
                     free_end += (*next_obj).heap_size();
                 }
                 obj_size = free_end - current;

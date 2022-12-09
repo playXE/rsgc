@@ -156,7 +156,7 @@ impl FreeList {
                 (*entry).unlink(&mut self.free_list_heads[index]);
                 self.biggest_free_list_index = index;
                 self.free_bytes -= (*entry).heap_size();
-                self.count += 1;
+                self.count -= 1;
                 return (entry.cast(), (*entry).heap_size());
             }
 
@@ -188,6 +188,27 @@ impl FreeList {
                 && !self.free_list_tails[index].is_null()
                 && unsafe {
                     (*self.free_list_tails[index]).next.is_null() })
+    }
+
+    pub fn external_fragmentation(&self) -> f64 {
+        let mut largest_free_block = 0;
+        let mut total = 0;
+
+        for i in 0..self.free_list_heads.len() {
+            unsafe {
+                let mut entry = self.free_list_heads[i];
+
+                while !entry.is_null() {
+                    let size = (*entry).heap_size();
+                    total += size;
+                    largest_free_block = largest_free_block.max(size);
+
+                    entry = (*entry).next;
+                }
+            }
+        }
+
+        1.0 - (largest_free_block as f64 / total as f64)
     }
 }
 

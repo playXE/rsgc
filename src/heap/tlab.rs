@@ -1,4 +1,6 @@
-use std::ptr::null_mut;
+use std::{ptr::null_mut, thread::ThreadId};
+
+use parking_lot::lock_api::RawMutex;
 
 use super::heap::heap;
 use crate::{formatted_size, heap::bitmap::HeapBitmap};
@@ -41,6 +43,7 @@ impl ThreadLocalAllocBuffer {
                 (*self.bitmap).set_atomic(obj);
             }
 
+            //println!("allocate {:p}->{:p} ({})", obj as *mut u8, (obj + size) as *mut u8, size);
             unsafe { debug_assert_eq!((*self.bitmap).find_object_start(obj) as usize, obj) }
             return obj as _;
         }
@@ -71,10 +74,10 @@ impl ThreadLocalAllocBuffer {
     }
 
     /// Invoked before GC cycle to mark free memory as actually free.
-    pub fn retire(&mut self) {
+    pub fn retire(&mut self, id: ThreadId) {
         if self.end() != 0 {
             unsafe {
-                self.free_remaining();
+                self.free_remaining(id);
             }
             self.top = 0;
             self.end = 0;
@@ -83,16 +86,17 @@ impl ThreadLocalAllocBuffer {
         }
     }
 
-    unsafe fn free_remaining(&mut self) {
+    unsafe fn free_remaining(&mut self, id: ThreadId) {
         let heap = heap();
-
+        heap.lock.lock();
         let region_ix = heap.region_index(self.start as *mut u8);
         let region = heap.get_region(region_ix);
         if self.end - self.top != 0 {
-            log::trace!(target: "gc-tlab", "Retiring TLAB for {:?}: {:p} {}", std::thread::current().id(), self.start as *mut u8, formatted_size(self.end - self.start));
+            log::trace!(target: "gc-tlab", "Retiring TLAB for {:?}: {:p} {}", id, self.start as *mut u8, formatted_size(self.end - self.start));
             (*region)
                 .free_list
                 .add(self.top as *mut u8, self.end - self.top);
         }
+        heap.lock.unlock();
     }
 }

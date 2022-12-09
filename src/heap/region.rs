@@ -285,6 +285,7 @@ impl HeapArguments {
                 self.min_heap_size = reasonable_minimum;
             }
         }
+
     }
 }
 
@@ -695,6 +696,10 @@ impl HeapRegion {
         };
         opts.max_tlab_size = opts.min_tlab_size.max(opts.max_tlab_size);
         opts.elastic_tlab = args.elastic_tlab;
+
+        if opts.parallel_region_stride == 0 && opts.parallel_gc_threads != 0 {
+            opts.parallel_region_stride = opts.region_count / opts.parallel_gc_threads;
+        }
 
         log::info!(target: "gc", "Region sizes setup complete");
         log::info!(target: "gc", "- Max heap size: {}", formatted_size(opts.max_heap_size));

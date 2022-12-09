@@ -3,12 +3,12 @@ use std::{
     collections::HashMap,
     intrinsics::{unlikely, likely},
     ptr::null_mut,
-    sync::atomic::{AtomicI8, Ordering}, mem::{size_of, MaybeUninit},
+    sync::atomic::{AtomicI8, Ordering}, mem::{size_of, MaybeUninit}, thread::{ThreadId, JoinHandle},
 };
 
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::{heap::stack::approximate_stack_pointer, object::{VTable, Allocation, HeapObjectHeader, VT, ConstVal, Handle}, traits::Object, formatted_size};
+use crate::{heap::stack::approximate_stack_pointer, object::{VTable, Allocation, HeapObjectHeader, VT, ConstVal, Handle, VtableTag, SizeTag}, traits::Object, formatted_size};
 use crate::heap::tlab::ThreadLocalAllocBuffer;
 
 use super::{safepoint, stack::StackBounds, heap::heap, AllocRequest, align_usize};
@@ -21,6 +21,7 @@ pub const GC_STATE_WAITING: i8 = 1;
 pub const GC_STATE_SAFE: i8 = 2;
 
 pub struct ThreadInfo {
+    pub(crate) id: ThreadId,
     pub(crate) tlab: ThreadLocalAllocBuffer,
     stack: StackBounds,
     max_tlab_size: usize,
@@ -79,6 +80,7 @@ impl ThreadInfo {
     }
 
     #[cold]
+    #[inline(never)]
     unsafe fn allocate_slow(&mut self, size: usize) -> *mut u8 {
         if size > self.max_tlab_size {
             self.allocate_outside_tlab(size)
@@ -112,7 +114,7 @@ impl ThreadInfo {
     }
 
     unsafe fn alloc_inside_tlab_slow(&mut self, size: usize) -> *mut u8 {
-        self.tlab.retire();
+        self.tlab.retire(self.id);
 
         let tlab_size = self.max_tlab_size;
         let mut req = AllocRequest::new(super::AllocType::ForLAB, tlab_size, tlab_size);
@@ -121,9 +123,9 @@ impl ThreadInfo {
         if mem.is_null() {
             return null_mut();
         }
+       
 
-        core::ptr::write_bytes(mem, 0, req.actual_size());
-
+        std::ptr::write_bytes(mem, 0, req.actual_size());
         self.tlab.initialize_(mem as _, mem.add(size) as _, mem.add(req.actual_size()) as _);
         (*self.tlab.bitmap).set_atomic(mem as _);
         mem
@@ -309,17 +311,17 @@ impl Drop for UnsafeScope {
     }
 }
 
-pub struct SafeScope {
+pub struct SafeScope<'a> {
     state: i8,
-    thread: &'static mut ThreadInfo,
+    thread: &'a mut ThreadInfo,
 }
 
-impl SafeScope {
+impl<'a> SafeScope<'a> {
     /// Enter safe GC state. This means current thread runs "unmanaged by GC code" and GC does not need to stop this thread
     /// at GC cycle.
     ///
     /// Returns current state to restore later.
-    pub fn new(thread: &'static mut ThreadInfo) -> Self {
+    pub fn new(thread: &'a mut ThreadInfo) -> Self {
         thread.set_last_sp(approximate_stack_pointer() as _);
         Self {
             state: thread.state_save_and_set(GC_STATE_SAFE),
@@ -328,7 +330,7 @@ impl SafeScope {
     }
 }
 
-impl Drop for SafeScope {
+impl<'a> Drop for SafeScope<'a> {
     fn drop(&mut self) {
         self.thread.gc_state_set(self.state, GC_STATE_SAFE);
     }
@@ -337,6 +339,7 @@ impl Drop for SafeScope {
 thread_local! {
     static THREAD: UnsafeCell<ThreadInfo> = UnsafeCell::new(
         ThreadInfo {
+            id: std::thread::current().id(),
             tlab: ThreadLocalAllocBuffer::new(),
             stack: StackBounds::current_thread_stack_bounds(),
             safepoint: null_mut(),
@@ -348,17 +351,20 @@ thread_local! {
         });
 }
 
+/*
 impl Drop for ThreadInfo {
     fn drop(&mut self) {
         let current = self as *mut Self;
-        
+        let safe = SafeScope::new(self);
+    
         acquire_threads().retain(|thread| {
             let thread = *thread;
 
             thread != current
         });
+        drop(safe);
     }
-}
+}*/
 
 pub struct Threads {
     pub threads: Mutex<Vec<*mut ThreadInfo>>,
@@ -397,3 +403,28 @@ pub(crate) unsafe fn wait_for_the_world<'a>() -> MutexGuard<'a, Vec<*mut ThreadI
 }
 
 pub struct OOM(pub usize);
+
+pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> JoinHandle<R>
+where R: Send + 'static
+{
+    std::thread::spawn(move || {
+        let thread = thread();
+        
+        let res = f();
+        thread.tlab.retire(thread.id);
+        let current = thread as *mut ThreadInfo;
+        let scope = SafeScope::new(thread);
+        let mut threads = acquire_threads();
+        
+        threads.retain(|thread| {
+            let th = *thread;
+            if th == current {
+                false 
+            } else {
+                true
+            }
+        });
+        drop(scope);
+        res
+    })
+}

@@ -33,10 +33,10 @@ impl MarkSweep {
         }
         
         let mut threads = wait_for_the_world();
-        log::debug!(target: "gc-safepoint", "stopped the world in {} ms", start.elapsed().as_millis());
+        log::debug!(target: "gc-safepoint", "stopped the world ({} thread(s)) in {} ms", threads.len(), start.elapsed().as_millis());
         // Phase 0: retire TLABs
         for thread in threads.iter().copied() {
-            (*thread).tlab.retire();
+            (*thread).tlab.retire((*thread).id);
         }
         {
             // Phase 1: Mark
@@ -54,18 +54,18 @@ impl MarkSweep {
             heap: heap(),
             live: AtomicUsize::new(0),
         };
+        
         match mode {
             GCMode::FullSTW => {
-                
+                log::trace!("start sweep");
                 if self.heap.options().parallel_sweep {
                     self.heap.parallel_heap_region_iterate(&closure);
                 } else {
                     self.heap.heap_region_iterate(&closure);
                 }
                 
-                
-            
                 self.heap.free_set_mut().recycle_trash();
+                
                 self.heap.lock.lock();
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
@@ -77,9 +77,8 @@ impl MarkSweep {
                 } else {
                     self.heap.heap_region_iterate(&closure);
                 }
-                
-                self.heap.lock.lock();
                 self.heap.free_set_mut().recycle_trash();
+                self.heap.lock.lock();
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
             }

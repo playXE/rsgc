@@ -433,7 +433,7 @@ impl RegionFreeSet {
      *   f) Heap has one small object per each region => IF =~ 1
      */
     pub fn internal_fragmentation(&self) -> f64 {
-        let mut squared = 0.0;
+        /*let mut squared = 0.0;
         let mut linear = 0.0;
         let mut count = 0;
 
@@ -454,7 +454,29 @@ impl RegionFreeSet {
             return 1.0 - s;
         } else {
             return 0.0;
+        }*/
+
+        let mut sum = 0.0;
+        let mut count = 0;
+
+        for index in self.mutator_leftmost..=self.mutator_rightmost {
+            if self.is_mutator_free(index) {
+                let r = self.heap().get_region(index);
+                unsafe {
+                    let frag = (*r).free_list.external_fragmentation();
+                    sum += frag;
+                    count += 1;
+                }
+            }
         }
+        if sum > 0.0 {
+            println!("sum {}", sum);
+            sum / count as f64 
+        } else {
+            println!("zero sum");
+            0.0
+        }
+    
     }
 
     pub fn log_status(&self) {
@@ -498,7 +520,8 @@ impl RegionFreeSet {
             }
 
             let max_humongous = max_contig * self.heap().options().region_size_bytes;
-            let frag_ext = if total_free_ext > 0 {
+
+            let frag_ext =if total_free_ext > 0 {
                 100 - (100 * max_humongous / total_free_ext)
             } else {
                 0
@@ -509,15 +532,14 @@ impl RegionFreeSet {
             } else {
                 0
             };
-
             log::debug!(
                 target: "gc",
-                "Free: {}, Max: {} regular, {} humongous, Frag: {}% external, {}% internal",
+                "Free: {}, Max: {} regular, {} humongous, Frag: {:.02}% external, {:.02}% internal",
                 formatted_size(total_free),
                 formatted_size(max),
                 formatted_size(max_humongous),
                 frag_ext,
-                frag_int
+                frag_int,
             );
         }
     }

@@ -1,5 +1,4 @@
-use std::sync::atomic::AtomicUsize;
-
+use rsgc::heap::thread;
 use rsgc::{
     heap::{thread::ThreadInfo, region::HeapArguments, heap::{Heap, heap}},
     object::{Allocation, Handle},
@@ -87,20 +86,9 @@ fn trees(max_depth: i64) {
 #[inline(never)]
 #[cold]
 fn bench() {
-    env_logger::init();
-    let mut args = HeapArguments::from_env();
-    args.parallel_mark = true;
-    args.parallel_sweep = true;
-    args.parallel_region_stride = 2048;
-    args.parallel_gc_threads = 4;
-    args.region_size = 512 * 1024;
-    args.allocation_threshold = 35;
-    let _ = Heap::new(args);
-    println!("regions: {}", heap().num_regions());
-
     let max_depth = match read_uint_from_env("TREE_DEPTH") {
         Some(x) if x > 6 => x,
-        _ => 21,
+        _ => 6,
     };
 
     let start = std::time::Instant::now();
@@ -116,17 +104,21 @@ fn bench() {
 }
 
 fn main() {
-    bench();
-
-    for _ in 0..3 {
-       
-        heap().request_gc();
-        
+    env_logger::init();
+    let mut args = HeapArguments::from_env();
+    args.target_num_regions = 2048;
+    args.parallel_region_stride = 4;
+    args.allocation_threshold = 10;
+    args.parallel_gc_threads = 4;
+    let _ = Heap::new(args);
+    let mut handles = vec![];
+    for _ in 0..6 {
+        handles.push(thread::spawn(|| {
+            bench();
+        }));
     }
 
-    let mut buf = String::new();
-    heap().print_on(&mut buf).unwrap();
-    println!("{}", buf);
-    
-    
+    for handle in handles {
+        handle.join().unwrap();
+    }
 }
