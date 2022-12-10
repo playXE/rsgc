@@ -162,7 +162,7 @@ impl ThreadInfo {
     #[inline]
     pub(crate) fn gc_state_set(&mut self, state: i8, old_state: i8) -> i8 {
         self.atomic_gc_state().store(state, Ordering::Release);
-        if old_state != 0 && state == 0 {
+        if old_state != 0 && state == 0 && !self.safepoint.is_null() {
             self.safepoint();
         }
 

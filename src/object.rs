@@ -26,6 +26,8 @@ pub struct VTable {
     pub finalize: fn(*mut ()),
     /// Set to true when type finalizer cannot revive object i.e when finalizer is equal to `T::drop`
     pub light_finalizer: bool,
+    /// Finalizer that requires ordering of finalziation. 
+    pub ordered_finalizer: bool,
     /// TypeId of managed object
     pub type_id: TypeId,
     /// Type name of managed object
@@ -96,6 +98,7 @@ impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
             erased::<T>
         },
         light_finalizer: T::LIGHT_FINALIZER,
+        ordered_finalizer: !T::LIGHT_FINALIZER && T::FINALIZE,
         type_id: TypeId::of::<T>(),
         type_name: std::any::type_name::<T>(),
         weak_process: {

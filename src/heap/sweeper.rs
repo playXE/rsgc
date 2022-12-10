@@ -1,4 +1,4 @@
-use std::{sync::atomic::AtomicUsize, collections::HashSet};
+use std::{sync::atomic::AtomicUsize, collections::HashSet, intrinsics::unlikely};
 
 use parking_lot::lock_api::RawMutex;
 
@@ -18,7 +18,7 @@ pub struct SweepGarbageClosure {
 
 impl SweepGarbageClosure {
     pub unsafe fn sweep_region(&self, region: *mut HeapRegion) -> bool {
-        /*let mut begin = (*region).bottom();
+        let mut begin = (*region).bottom();
         let mut start_of_gap = begin;
         let end = begin + self.heap.options().region_size_bytes;
         (*region).free_list.clear();
@@ -36,6 +36,9 @@ impl SweepGarbageClosure {
             }
 
             if !(*header).is_marked() {
+                if unlikely((*header).vtable().light_finalizer) {
+                    ((*header).vtable().finalize)(header.add(1).cast());
+                }
                 begin += size;
                 continue;
             }
@@ -65,7 +68,7 @@ impl SweepGarbageClosure {
             (*region).largest_free_list_entry =
                 std::cmp::max((*region).largest_free_list_entry, size);
             free += size;
-            println!("free {:p} {}", start_of_gap as *mut u8, size);
+            
         }
         (*region).set_used(used);
         assert!(used != 0 || free != 0);
@@ -74,10 +77,10 @@ impl SweepGarbageClosure {
         );
         (*region).last_sweep_free = free;
 
-        start_of_gap == (*region).bottom()*/
-
+        start_of_gap == (*region).bottom()
         
-        let mut used_in_bytes = 0;
+          
+        /*let mut used_in_bytes = 0;
         let mut free = 0;
         let start = (*region).bottom();
         let end = (*region).end();
@@ -106,6 +109,11 @@ impl SweepGarbageClosure {
                     let next_obj = free_end as *mut HeapObjectHeader;
                     if (*next_obj).is_marked() {
                         break;
+                    }
+                    if !(*next_obj).is_free() {
+                        if unlikely((*next_obj).vtable().light_finalizer) {
+                            ((*next_obj).vtable().finalize)(next_obj.add(1).cast());
+                        }
                     }
                     debug_assert!((*next_obj).heap_size() != 0x42 && (*next_obj).heap_size() != 0, "heap object {:p} with zero size ({:p} vt)", next_obj, (*next_obj).vtable());
                     free_end += (*next_obj).heap_size();
@@ -136,7 +144,7 @@ impl SweepGarbageClosure {
         if used_in_bytes == 0 {
             assert!(free != 0, "no used objects in region means there is free memory");
         }
-        used_in_bytes == 0
+        used_in_bytes == 0*/
     }
 }
 

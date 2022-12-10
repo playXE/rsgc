@@ -35,5 +35,3 @@ winapi = { version = "0.3", features = [
 [features]
 conditional-safepoint = []
 
-[profile.release]
-debug = true

@@ -1,8 +1,10 @@
+use rsgc::heap::heap::heap;
 use rsgc::heap::thread;
 use rsgc::{
-    heap::{thread::ThreadInfo, region::HeapArguments, heap::{Heap, heap}},
+    env::read_uint_from_env,
+    heap::{heap::Heap, region::HeapArguments, thread::ThreadInfo},
     object::{Allocation, Handle},
-    traits::Object, env::read_uint_from_env,
+    traits::Object,
 };
 
 #[allow(dead_code)]
@@ -25,12 +27,17 @@ impl Object for TreeNode {
     }
 }
 
-impl Allocation for TreeNode {}
+impl Allocation for TreeNode {
+    const FINALIZE: bool = false;
+    const LIGHT_FINALIZER: bool = false;
+}
 
 impl TreeNode {
     fn check_tree(&self) -> usize {
         match (self.left, self.right) {
-            (Some(left), Some(right)) => left.as_ref().check_tree() + right.as_ref().check_tree() + 1,
+            (Some(left), Some(right)) => {
+                left.as_ref().check_tree() + right.as_ref().check_tree() + 1
+            }
             _ => 1,
         }
     }
@@ -65,7 +72,10 @@ fn loops(iterations: i64, depth: i64) {
         item < iterations
     } {}
 
-    println!("{}\t trees of depth {}\t check: {}", iterations, depth, check);
+    println!(
+        "{}\t trees of depth {}\t check: {}",
+        iterations, depth, check
+    );
 }
 
 fn trees(max_depth: i64) {
@@ -80,7 +90,11 @@ fn trees(max_depth: i64) {
         depth <= max_depth
     } {}
 
-    println!("long lived tree of depth {}\t check: {}", max_depth, long_lasting_tree.as_ref().check_tree());
+    println!(
+        "long lived tree of depth {}\t check: {}",
+        max_depth,
+        long_lasting_tree.as_ref().check_tree()
+    );
 }
 
 #[inline(never)]
@@ -95,20 +109,29 @@ fn bench() {
     let stretch_depth = max_depth + 1;
 
     {
-        println!("stretch tree of depth {}\t check: {}", stretch_depth, create_tree(rsgc::heap::thread::thread(), stretch_depth as _).as_ref().check_tree());
+        println!(
+            "stretch tree of depth {}\t check: {}",
+            stretch_depth,
+            create_tree(rsgc::heap::thread::thread(), stretch_depth as _)
+                .as_ref()
+                .check_tree()
+        );
     }
 
     trees(max_depth as _);
 
-    println!("binary trees took: {} secs", start.elapsed().as_micros() as f64 / 1000.0 / 1000.0);
+    println!(
+        "binary trees took: {} secs",
+        start.elapsed().as_micros() as f64 / 1000.0 / 1000.0
+    );
 }
 
 fn main() {
     env_logger::init();
     let mut args = HeapArguments::from_env();
-    args.target_num_regions = 2048;
-    args.parallel_region_stride = 4;
-    args.allocation_threshold = 10;
+    //args.target_num_regions = 2048;
+    args.parallel_region_stride = 32;
+    args.allocation_threshold = 30;
     args.parallel_gc_threads = 4;
     let _ = Heap::new(args);
     let mut handles = vec![];
@@ -121,4 +144,6 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
+
+    heap().request_gc();
 }
