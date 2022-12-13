@@ -49,6 +49,7 @@ pub struct HeapRegion {
     pub(crate) largest_free_list_entry: usize,
     pub(crate) last_sweep_free: usize,
     pub empty_time: Instant,
+    pub to_sweep: bool
 }
 
 #[derive(Debug)]
@@ -84,6 +85,11 @@ pub struct HeapArguments {
     pub initial_ram_percentage: f64,
     pub parallel_mark: bool,
     pub parallel_sweep: bool,
+    pub mark_loop_stride: usize,
+    pub max_satb_buffer_flushes: usize,
+    pub max_satb_buffer_size: usize,
+    pub full_gc_threshold: usize,
+    pub always_full: bool
 }
 
 impl HeapArguments {
@@ -207,7 +213,7 @@ impl HeapArguments {
             None => (),
         }
 
-        match read_uint_from_env("GC_PARALLEL_GC_THREADS") {
+        match read_uint_from_env("GC_PARALLEL_THREADS") {
             Some(x) => this.parallel_gc_threads = x,
             None => (),
         }
@@ -235,6 +241,32 @@ impl HeapArguments {
         match read_float_from_env("GC_INITIAL_RAM_PERCENTAGE") {
             Some(x) => this.initial_ram_percentage = x,
             None => (),
+        }
+
+
+        match read_uint_from_env("GC_MARK_LOOP_STRIDE") {
+            Some(x) => this.mark_loop_stride = x,
+            None => ()
+        }
+
+        match read_uint_from_env("GC_MAX_SATB_BUFFER_FLUSHES") {
+            Some(x) => this.max_satb_buffer_flushes = x,
+            None => ()
+        }
+
+        match read_uint_from_env("GC_MAX_SATB_BUFFER_SIZE") {
+            Some(x) => this.max_satb_buffer_size = x,
+            None => ()
+        }
+
+        match read_uint_from_env("GC_FULL_GC_THRESHOLD") {
+            Some(x) => this.full_gc_threshold = x,
+            None => ()
+        }
+
+        match read_uint_from_env("GC_ALWAYS_FULL") {
+            Some(x) => this.always_full = x > 0,
+            None => ()
         }
 
         this
@@ -292,6 +324,7 @@ impl HeapArguments {
 impl Default for HeapArguments {
     fn default() -> Self {
         Self {
+            always_full: false,
             min_region_size: virtual_memory::page_size(),
             max_region_size: 32 * 1024 * 1024,
             target_num_regions: 2048,
@@ -315,13 +348,16 @@ impl Default for HeapArguments {
             initial_heap_size: 0,
             parallel_mark: true,
             parallel_sweep: true,
-
+            mark_loop_stride: 1000,
             tlab_refill_waste_fraction: 64,
             tlab_size: 0,
             tlab_waste_increment: 4,
             tlab_waste_target_percent: 1,
             parallel_region_stride: 1024,
-            parallel_gc_threads: 4,
+            parallel_gc_threads: std::thread::available_parallelism().map(|x| x.get() / 2).unwrap_or(2),
+            max_satb_buffer_flushes: 5,
+            max_satb_buffer_size: 1024,
+            full_gc_threshold: 3
         }
     }
 }
@@ -358,6 +394,11 @@ pub struct HeapOptions {
     pub parallel_region_stride: usize,
     pub parallel_mark: bool,
     pub parallel_sweep: bool,
+    pub mark_loop_stride: usize,
+    pub max_satb_buffer_flushes: usize,
+    pub max_satb_buffer_size: usize,
+    pub full_gc_threshold: usize,
+    pub always_full: bool
 }
 
 impl HeapOptions {
@@ -410,6 +451,7 @@ impl HeapRegion {
             begin: start as *mut u8,
             index,
             used: 0,
+            to_sweep: false,
             object_start_bitmap: HeapBitmap::new(start, opts.region_size_bytes),
             end: (start + opts.region_size_bytes) as *mut u8,
             free_list: FreeList::new(opts),
@@ -619,6 +661,11 @@ impl HeapRegion {
         opts.control_interval_min = args.control_interval_min;
         opts.uncommit_delay = args.uncommit_delay;
         opts.guaranteed_gc_interval = args.guaranteed_gc_interval;
+        opts.mark_loop_stride = args.mark_loop_stride.max(32);
+        opts.max_satb_buffer_flushes = args.max_satb_buffer_flushes;
+        opts.max_satb_buffer_size = args.max_satb_buffer_size;
+        opts.full_gc_threshold = args.full_gc_threshold;
+        opts.always_full = args.always_full;
         let min_region_size = if args.min_region_size < Self::MIN_REGION_SIZE {
             Self::MIN_REGION_SIZE
         } else {
@@ -697,7 +744,7 @@ impl HeapRegion {
         opts.max_tlab_size = opts.min_tlab_size.max(opts.max_tlab_size);
         opts.elastic_tlab = args.elastic_tlab;
 
-        if opts.parallel_region_stride == 0 && opts.parallel_gc_threads != 0 {
+        if opts.parallel_region_stride == 0 && opts.parallel_gc_threads != 0 || opts.parallel_region_stride == 1024 {
             opts.parallel_region_stride = opts.region_count / opts.parallel_gc_threads;
         }
 

@@ -59,3 +59,30 @@ impl SharedFlag {
     }
 
 }
+
+pub struct SharedEnumFlag(SharedValue);
+
+impl SharedEnumFlag {
+    pub fn new() -> Self {
+        Self(SharedValue::new(0))
+    }
+
+    pub fn set(&self, val: u8) {
+        self.0.store(val, Ordering::Release);
+    }
+
+    pub fn get(&self) -> u8 {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn cmpxchg(&self, old: u8, new: u8) -> u8 {
+        match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(val) => val,
+            Err(val) => val
+        }
+    }
+
+    pub fn addr_of(&self) -> *const SharedValue {
+        &self.0
+    }
+}

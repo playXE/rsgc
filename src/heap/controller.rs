@@ -2,7 +2,7 @@ use std::{sync::{atomic::{AtomicBool, Ordering, AtomicUsize}, Arc}, time::{Insta
 
 use parking_lot::{Mutex, Condvar, lock_api::RawMutex};
 
-use crate::{sync::monitor::Monitor, formatted_size, heap::mark_sweep::MarkSweep};
+use crate::{sync::monitor::Monitor, formatted_size, heap::{stw_gc::StopTheWorldGC, concurrent_gc::ConcurrentGC, degenerated_gc::DegeneratedGC, DegenPoint}};
 
 use super::{shared_vars::SharedFlag, concurrent_thread::ConcurrentGCThread, heap::heap, AllocRequest};
 
@@ -11,10 +11,9 @@ use super::{shared_vars::SharedFlag, concurrent_thread::ConcurrentGCThread, heap
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum GCMode {
     None,
-    /// Happens when user explicitly requested GC or alloc failure
-    FullSTW,
-    /// Happens when threshold is reached
-    ConcurrentSweep, 
+    Concurrent,
+    STWDegen,
+    STWFull,
 }
 
 pub struct ControlThread {
@@ -118,6 +117,8 @@ impl ControlThread {
                 "Failed to allocate {}",
                 formatted_size(req.size())
             );
+
+            heap().cancel_gc();
         }
 
         let mut ml = self.alloc_failure_waiters_lock.lock(true);
@@ -215,20 +216,29 @@ impl ConcurrentGCThread for ControlThread {
 
             if alloc_failure_pending {
                 log::info!(target: "gc", "Trigger: Handle allocation failure");
-                mode = GCMode::FullSTW;
+                if heap.should_degenerate_cycle() {
+                    mode = GCMode::STWDegen;
+                } else {
+                    mode = GCMode::STWFull;
+                }
             } else if explicit_gc_requested {
                 log::info!(target: "gc", "Trigger: Explicit GC request");
-                mode = GCMode::FullSTW;
+                mode = GCMode::STWFull;
             } else {
                 if heap.should_start_gc() {
-                    mode = GCMode::FullSTW;
+                    mode = GCMode::Concurrent;
                 }
             }
+
+            
 
             let gc_requested = mode != GCMode::None;
 
             if gc_requested {
                 unsafe {
+                    if heap.options().always_full {
+                        mode = GCMode::STWFull;
+                    }
                     self.update_gc_id();
                     heap.set_allocated(0);
 
@@ -243,10 +253,33 @@ impl ConcurrentGCThread for ControlThread {
 
                    
                     {
-                        
-                        let mut ms = MarkSweep::new();
-                        ms.do_collect(mode);
-                        
+                        match mode {
+                            GCMode::Concurrent => {
+                                let mut collector = ConcurrentGC::new();
+
+                                if !collector.collect() {
+                                    let mut degen = DegeneratedGC::new(collector.degen_point());
+                                    degen.collect();
+                                    heap.record_success_degenerate();
+                                } else {
+                                    heap.record_success_concurrent();
+                                }
+                            }
+                            GCMode::STWDegen => {
+                                let mut collector = DegeneratedGC::new(DegenPoint::OutsideCycle);
+
+                                collector.collect();
+                                heap.record_success_degenerate();
+                            }
+                            GCMode::STWFull => {
+                                let mut collector = StopTheWorldGC::new();
+
+                                collector.do_collect();
+                                heap.record_success_full();
+                            }
+                            _ => ()
+                        }
+                       
                     }
 
                     // If this was the requested GC cycle, notify waiters about it

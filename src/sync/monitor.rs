@@ -1,11 +1,14 @@
 use std::{time::Instant, ops::{Deref, DerefMut}};
 
-use super::mutex::{Mutex, Condvar, MutexGuard};
+use super::mutex::{Mutex, Condvar, MutexGuard, WaitTimeoutResult};
 
 pub struct Monitor<T> {
     mutex: Mutex<T>,
     cv: Condvar
 }
+
+unsafe impl<T> Send for Monitor<T> {}
+unsafe impl<T> Sync for Monitor<T> {}
 
 impl<T> Monitor<T> {
     pub const fn new(val: T) -> Self {
@@ -15,15 +18,15 @@ impl<T> Monitor<T> {
         }
     }
 
-    pub fn lock<'a>(&'a self, safepoint: bool) -> MontiroLocker<'a, T> {
-        MontiroLocker {
+    pub fn lock<'a>(&'a self, safepoint: bool) -> MonitorLocker<'a, T> {
+        MonitorLocker {
             guard: self.mutex.lock(safepoint),
             cv: &self.cv
         }
     }
 
-    pub fn try_lock<'a>(&'a self, safepoint: bool) -> Option<MontiroLocker<'a, T>> {
-        self.mutex.try_lock(safepoint).map(|guard| MontiroLocker {
+    pub fn try_lock<'a>(&'a self, safepoint: bool) -> Option<MonitorLocker<'a, T>> {
+        self.mutex.try_lock(safepoint).map(|guard| MonitorLocker {
             guard,
             cv: &self.cv
         })
@@ -38,12 +41,12 @@ impl<T> Monitor<T> {
     }
 }
 
-pub struct MontiroLocker<'a, T> {
+pub struct MonitorLocker<'a, T> {
     cv: &'a Condvar,
     guard: MutexGuard<'a, T>,
 }
 
-impl<'a, T> MontiroLocker<'a, T> {
+impl<'a, T> MonitorLocker<'a, T> {
     pub fn wait(&mut self) {
         self.cv.wait(&mut self.guard);
     }
@@ -52,26 +55,27 @@ impl<'a, T> MontiroLocker<'a, T> {
         self.cv.wait_until(&mut self.guard, timeout);
     }
 
+    pub fn wait_for(&mut self, timeout: std::time::Duration) -> WaitTimeoutResult {
+        self.cv.wait_for(&mut self.guard, timeout)
+    }
+
     pub fn wait_while(&mut self, condition: impl FnMut(&mut T) -> bool) {
         self.cv.wait_while(&mut self.guard, condition)
     }
 
     pub fn notify(self) -> bool {
-        unsafe { self.guard.mutex.raw().unlock_fair(); }
         let res = self.cv.notify_one();
-        std::mem::forget(self);
         res 
     }
 
-    pub fn notify_all(self) -> usize {
-        unsafe { self.guard.mutex.raw().unlock_fair(); }
+    pub fn notify_all(&self) -> usize {
         let res = self.cv.notify_all();
-        std::mem::forget(self);
+       
         res 
     }
 }
 
-impl<'a, T> Deref for MontiroLocker<'a, T> {
+impl<'a, T> Deref for MonitorLocker<'a, T> {
     type Target = MutexGuard<'a, T>;
 
     fn deref(&self) -> &Self::Target {
@@ -79,12 +83,12 @@ impl<'a, T> Deref for MontiroLocker<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for MontiroLocker<'a, T> {
+impl<'a, T> DerefMut for MonitorLocker<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }
 }
-impl<'a, T> Drop for MontiroLocker<'a, T> {
+impl<'a, T> Drop for MonitorLocker<'a, T> {
     fn drop(&mut self) {
         self.cv.notify_all();
     }

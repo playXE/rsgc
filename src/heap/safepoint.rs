@@ -6,7 +6,9 @@ use std::{
 #[cfg(target_family = "windows")]
 use winapi::um::{memoryapi::*, winnt::*};
 
-use super::signals::install_signal_handlers;
+use crate::heap::thread::threads;
+
+use super::{heap::heap, signals::install_signal_handlers, thread::ThreadInfo};
 
 pub(crate) static SAFEPOINT_PAGE: AtomicPtr<u8> = AtomicPtr::new(null_mut());
 pub(crate) static SAFEPOINT_ENABLE_CNT: AtomicU8 = AtomicU8::new(0);
@@ -31,7 +33,7 @@ pub fn enable() {
     }
 
     let pageaddr = SAFEPOINT_PAGE.load(std::sync::atomic::Ordering::Relaxed);
-    #[cfg(not(feature="conditional-safepoint"))]
+    #[cfg(not(feature = "conditional-safepoint"))]
     unsafe {
         #[cfg(not(windows))]
         {
@@ -52,7 +54,7 @@ pub fn enable() {
             );
         }
     }
-    #[cfg(feature="conditional-safepoint")]
+    #[cfg(feature = "conditional-safepoint")]
     unsafe {
         pageaddr.write(1);
     }
@@ -64,7 +66,7 @@ pub fn disable() {
 
     let pageaddr = SAFEPOINT_PAGE.load(std::sync::atomic::Ordering::Relaxed);
 
-    #[cfg(not(feature="conditional-safepoint"))]
+    #[cfg(not(feature = "conditional-safepoint"))]
     unsafe {
         #[cfg(not(windows))]
         {
@@ -86,7 +88,7 @@ pub fn disable() {
         }
     }
 
-    #[cfg(feature="conditional-safepoint")]
+    #[cfg(feature = "conditional-safepoint")]
     unsafe {
         pageaddr.write(0);
     }
@@ -160,7 +162,39 @@ pub fn wait_gc() {
     }
 }
 
-/* 
+
+
+pub struct SafepointSynchronize {}
+
+impl SafepointSynchronize {
+    pub(crate) unsafe fn begin() -> &'static [*mut ThreadInfo] {
+        heap().safepoint_synchronize_begin();
+
+        let threads = threads();
+        threads.get().lock.lock();
+
+        assert!(enter());
+
+        for thread in threads.get().threads.iter().copied() {
+            let th = &*thread;
+            while th.atomic_gc_state().load(Ordering::Relaxed) == 0
+                || th.atomic_gc_state().load(Ordering::Acquire) == 0
+            {
+                std::hint::spin_loop();
+            }
+        }
+
+        &threads.get().threads
+    }
+
+    pub(crate) unsafe fn end() {
+        heap().safepoint_synchronize_end();
+        threads().get().lock.unlock();
+        end();
+    }
+}
+
+/*
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -179,7 +213,7 @@ mod tests {
         static STOP: AtomicBool = AtomicBool::new(false);
         let handles = (0..8)
             .map(|_| {
-                
+
                 std::thread::spawn(move || {
                     let _ = thread();
                     let mut prev = SPAWNED.load(std::sync::atomic::Ordering::Acquire);
@@ -201,7 +235,7 @@ mod tests {
                         thread().safepoint();
 
                         if STOP.load(std::sync::atomic::Ordering::Acquire) {
-                            
+
                             break;
                         }
                     }

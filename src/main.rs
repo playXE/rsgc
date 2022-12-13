@@ -1,4 +1,3 @@
-use rsgc::heap::heap::heap;
 use rsgc::heap::thread;
 use rsgc::{
     env::read_uint_from_env,
@@ -55,7 +54,9 @@ fn create_tree(thread: &mut ThreadInfo, mut depth: i64) -> Handle<TreeNode> {
         depth -= 1;
 
         node.as_mut().left = Some(create_tree(thread, depth));
+        thread.write_barrier(node);
         node.as_mut().right = Some(create_tree(thread, depth));
+        thread.write_barrier(node);
     }
 
     node
@@ -128,14 +129,11 @@ fn bench() {
 
 fn main() {
     env_logger::init();
-    let mut args = HeapArguments::from_env();
-    //args.target_num_regions = 2048;
-    args.parallel_region_stride = 32;
-    args.allocation_threshold = 30;
-    args.parallel_gc_threads = 4;
+    let args = HeapArguments::from_env();
+
     let _ = Heap::new(args);
     let mut handles = vec![];
-    for _ in 0..6 {
+    for _ in 0..1 {
         handles.push(thread::spawn(|| {
             bench();
         }));
@@ -144,6 +142,4 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
-
-    heap().request_gc();
 }

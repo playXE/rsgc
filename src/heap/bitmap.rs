@@ -121,7 +121,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     #[inline]
     pub fn check_bit(&self, addr: usize) -> bool {
         let (index, bit) = self.object_start_index_bit(addr);
-        (self.bmp[index] & (1 << bit)) != 0
+        unsafe { (*self.bmp.get_unchecked(index) & (1 << bit)) != 0 }
     }
 
     #[inline]
@@ -150,7 +150,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
         }
     }
 
-    pub fn clear_range_atomic(&mut self, begin: usize, end: usize) {
+    pub fn clear_range_atomic(&self, begin: usize, end: usize) {
         let mut begin_offset = begin.wrapping_sub(self.offset);
         let mut end_offset = end.wrapping_sub(self.offset);
 
@@ -167,6 +167,26 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
 
     pub fn clear(&mut self) {
         self.bmp.fill(0);
+    }
+
+    pub fn atomic_test_and_set(&self, addr: usize) -> bool {
+        let (index, bit) = self.object_start_index_bit(addr);
+        let cell = self.cell_atomic(index);
+
+        let mut old_val = cell.load(Ordering::Relaxed);
+
+        loop {
+            let new_val = old_val | (1 << bit);
+            
+            if new_val == old_val {
+                return false;
+            }
+            
+            match cell.compare_exchange_weak(old_val, new_val, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(val) => old_val = val,
+            }
+        }
     }
 }
 

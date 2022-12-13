@@ -1,36 +1,41 @@
 use std::{
     mem::{size_of, MaybeUninit},
     ptr::null_mut,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering, AtomicU8},
     time::Instant,
 };
 
 use crate::{
     formatted_size,
     object::HeapObjectHeader,
-    traits::{Visitor, WeakProcessor},
+    traits::{Visitor, WeakProcessor}, sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
 };
 
 use super::{
+    align_up, align_usize,
     bitmap::HeapBitmap,
     concurrent_thread::ConcurrentGCThread,
     controller::ControlThread,
     free_set::RegionFreeSet,
+    mark_bitmap::MarkBitmap,
+    marking_context::MarkingContext,
+    memory_region::MemoryRegion,
     region::{HeapArguments, HeapOptions, HeapRegion},
     safepoint,
-    shared_vars::SharedFlag,
+    shared_vars::{SharedFlag, SharedEnumFlag},
     virtual_memory::{self, VirtualMemory},
-    AllocRequest,
+    AllocRequest, thread::{thread, thread_no_register, SafeScope},
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use scoped_thread_pool::Pool;
 
 pub trait GlobalRoot {
-    fn walk(&self, visitor: &mut dyn Visitor) -> bool;
+    fn walk(&self, visitor: &mut dyn Visitor);
 }
 
 pub struct Heap {
     pub(crate) lock: Lock,
+    pub(crate) is_concurrent_mark_in_progress: SharedFlag,
     mem: Box<VirtualMemory>,
     regions_storage: Box<VirtualMemory>,
     regions: Vec<*mut HeapRegion>,
@@ -49,7 +54,15 @@ pub struct Heap {
     weak_refs: Vec<*mut HeapObjectHeader>,
     global_roots: Vec<Box<dyn GlobalRoot>>,
     scoped_pool: scoped_thread_pool::Pool,
+
+    marking_context: &'static mut MarkingContext,
+    cancelled_gc: SharedEnumFlag,
+    degenerate_cycles_in_a_row: usize,
 }
+
+pub const GC_CANCELLABLE: u8 = 0;
+pub const GC_CANCELLED: u8 = 1;
+pub const GC_NOT_CANCELLED: u8 = 2;
 
 impl Heap {
     pub fn free_set(&self) -> &RegionFreeSet {
@@ -64,9 +77,21 @@ impl Heap {
         &self.opts
     }
 
+    pub fn is_concurrent_mark_in_progress(&self) -> bool {
+        self.is_concurrent_mark_in_progress.is_set()
+    }
+
+    pub fn set_concurrent_mark_in_progress(&self, value: bool) {
+        if value {
+            self.is_concurrent_mark_in_progress.set();
+        } else {
+            self.is_concurrent_mark_in_progress.unset();
+        }
+    }
+
     pub fn new(mut args: HeapArguments) -> &'static mut Self {
         safepoint::init();
-
+        SuspendibleThreadSet::init();
         args.set_heap_size();
         let opts = HeapRegion::setup_sizes(&args);
 
@@ -98,6 +123,11 @@ impl Heap {
             }
         }
 
+        let mark_ctx = Box::leak(Box::new(MarkingContext::new(
+            MemoryRegion::new(mem.start() as _, mem.size()),
+            opts.parallel_gc_threads.max(1),
+        )));
+
         let regions_mem = VirtualMemory::allocate_aligned(
             opts.region_count * size_of::<HeapRegion>(),
             virtual_memory::page_size(),
@@ -113,6 +143,7 @@ impl Heap {
             regions: vec![null_mut(); opts.region_count],
             regions_storage: regions_mem,
             mem,
+            is_concurrent_mark_in_progress: SharedFlag::new(),
             opts,
             initial_size,
             minimum_size,
@@ -127,8 +158,10 @@ impl Heap {
             weak_refs: vec![],
             global_roots: vec![],
             scoped_pool: scoped_thread_pool::Pool::new(opts.parallel_gc_threads),
+            marking_context: mark_ctx,
+            cancelled_gc: SharedEnumFlag::new(),
+            degenerate_cycles_in_a_row: 0
         }));
-
         let ptr = this as *mut Heap;
         for i in 0..opts.region_count {
             let start = this.mem.start() + this.opts.region_size_bytes * i;
@@ -156,6 +189,7 @@ impl Heap {
     pub fn min_capacity(&self) -> usize {
         self.minimum_size
     }
+    
 
     pub fn entry_uncommit(&mut self, shrink_before: Instant, shrink_until: usize) {
         // Application allocates from the beginning of the heap.
@@ -300,8 +334,8 @@ impl Heap {
         }
     }
 
-    pub unsafe fn walk_global_roots(&mut self, vis: &mut dyn Visitor) {
-        self.global_roots.retain(|root| root.walk(vis));
+    pub unsafe fn walk_global_roots(&self, vis: &mut dyn Visitor) {
+        self.global_roots.iter().for_each(|root| root.walk(vis));
     }
 
     pub unsafe fn process_weak_refs(&mut self) {
@@ -347,6 +381,23 @@ impl Heap {
                 .unsafe_peek_free()
                 .min(self.options().max_tlab_size)
         }
+    }
+
+    pub fn should_degenerate_cycle(&self) -> bool {
+        self.degenerate_cycles_in_a_row <= self.options().full_gc_threshold
+    }
+
+    pub fn record_success_concurrent(&mut self) {
+        self.degenerate_cycles_in_a_row = 0;
+        
+    }
+
+    pub fn record_success_degenerate(&mut self) {
+        self.degenerate_cycles_in_a_row += 1;
+    }
+
+    pub fn record_success_full(&mut self) {
+        self.degenerate_cycles_in_a_row = 0;
     }
 
     pub fn should_start_gc(&self) -> bool {
@@ -406,6 +457,14 @@ impl Heap {
 
     pub fn workers(&self) -> &Pool {
         &self.scoped_pool
+    }
+
+    pub fn marking_context(&self) -> &MarkingContext {
+        &self.marking_context
+    }
+
+    pub fn marking_context_mut(&mut self) -> &mut MarkingContext {
+        &mut self.marking_context
     }
 
     pub fn allocate_memory(&mut self, req: &mut AllocRequest) -> *mut u8 {
@@ -470,9 +529,29 @@ impl Heap {
         }
     }
 
+
+    
     pub fn parallel_heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
-        if self.num_regions() > self.options().parallel_region_stride && self.scoped_pool.workers() != 0 {
+        if self.num_regions() > self.options().parallel_region_stride
+            && self.scoped_pool.workers() != 0
+        {
             let task = ParallelHeapRegionTask {
+                blk,
+                index: AtomicUsize::new(0),
+            };
+            self.scoped_pool.scoped(move |scope| {
+                task.work(scope);
+            });
+        } else {
+            self.heap_region_iterate(blk);
+        }
+    }
+
+    pub fn parallel_heap_region_iterate_with_cancellation(&self, blk: &dyn HeapRegionClosure) {
+        if self.num_regions() > self.options().parallel_region_stride
+            && self.scoped_pool.workers() != 0
+        {
+            let task = ParallelHeapRegionTaskWithCancellationCheck {
                 blk,
                 index: AtomicUsize::new(0),
             };
@@ -547,6 +626,20 @@ impl Heap {
         }
     }
 
+    pub fn prepare_gc(&mut self) {
+        self.reset_mark_bitmap();
+    }
+
+    pub fn reset_mark_bitmap(&mut self) {
+        /*let clos = ResetBitmapClosure {
+            heap: heap()
+        };
+        self.parallel_heap_region_iterate(&clos);*/
+       
+        self.marking_context.clear_bitmap_full();
+        
+    }
+
     pub unsafe fn get_humongous_start(&self, mut r: *mut HeapRegion) -> *mut HeapRegion {
         let mut i = (*r).index();
 
@@ -606,6 +699,71 @@ impl Heap {
 
         Ok(())
     }
+
+
+    pub fn try_cancel_gc(&self) -> bool {
+        loop {
+            let prev = self.cancelled_gc.cmpxchg(GC_CANCELLABLE, GC_CANCELLED);
+            if prev == GC_CANCELLABLE {
+                return true;
+            } else if prev == GC_CANCELLED {
+                return false;
+            }
+
+            let thread = unsafe { thread_no_register() };
+            if thread.is_registered() {
+                // We need to provide a safepoint here, otherwise we might
+                // spin forever if a SP is pending.
+                let scope = SafeScope::new(thread);
+                std::hint::spin_loop();
+                drop(scope);
+            }
+        }
+    }
+
+    pub fn cancel_gc(&self) {
+        self.try_cancel_gc();
+    }
+
+    pub fn cancelled_gc_address(&self) -> *const AtomicU8 {
+        self.cancelled_gc.addr_of()
+    }
+
+    pub fn cancelled_gc(&self) -> bool {
+        self.cancelled_gc.get() == GC_CANCELLED
+    }
+
+    pub fn check_cancelled_gc_and_yield(&self, sts_active: bool) -> bool {
+        if !sts_active {
+            return self.cancelled_gc();
+        }
+
+        let prev = self.cancelled_gc.cmpxchg(GC_CANCELLABLE, GC_NOT_CANCELLED);
+
+        if prev == GC_CANCELLABLE || prev == GC_NOT_CANCELLED {
+            if SuspendibleThreadSet::should_yield() {
+                SuspendibleThreadSet::yield_();
+            }
+
+            if prev == GC_CANCELLABLE {
+                self.cancelled_gc.set(GC_CANCELLABLE);
+            }
+            return false;
+        }
+        true
+    }
+
+    pub fn clear_cancelled_gc(&self) {
+        self.cancelled_gc.set(GC_CANCELLABLE);
+    }
+
+    pub fn safepoint_synchronize_begin(&self) {
+        SuspendibleThreadSet::synchronize();
+    }
+
+    pub fn safepoint_synchronize_end(&self) {
+        SuspendibleThreadSet::desynchronize();
+    }
 }
 
 struct HeapRef(&'static mut Heap);
@@ -661,5 +819,52 @@ impl<'a> ParallelHeapRegionTask<'a> {
                 }
             });
         }
+    }
+}
+
+pub struct ParallelHeapRegionTaskWithCancellationCheck<'a> {
+    blk: &'a dyn HeapRegionClosure,
+    index: AtomicUsize,
+}
+
+
+impl<'a> ParallelHeapRegionTaskWithCancellationCheck<'a> {
+    pub fn work<'b>(self, scope: &'b scoped_thread_pool::Scope<'a>) {
+        let heap = heap();
+        let stride = heap.options().parallel_region_stride;
+
+        let max = heap.num_regions();
+        while self.index.load(Ordering::Relaxed) < max {
+            let cur = self.index.fetch_add(stride, Ordering::Relaxed);
+            let start = cur;
+            let end = max.min(cur + stride);
+
+            if start >= max || heap.cancelled_gc() {
+                break;
+            }
+            scope.execute(move || {
+                let heap = super::heap::heap();
+                if heap.cancelled_gc() {
+                    return;
+                }
+                for i in cur..end {
+                    let region = heap.get_region(i);
+                    self.blk.heap_region_do(region);
+                }
+            });
+        }
+    }
+}
+
+pub struct ResetBitmapClosure {
+    heap: &'static Heap,
+}
+
+unsafe impl Send for ResetBitmapClosure {}
+unsafe impl Sync for ResetBitmapClosure {}
+
+impl HeapRegionClosure for ResetBitmapClosure {
+    fn heap_region_do(&self, r: *mut HeapRegion) {
+        self.heap.marking_context().clear_bitmap(r);
     }
 }

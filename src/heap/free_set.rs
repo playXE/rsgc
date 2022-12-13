@@ -1,5 +1,6 @@
 use std::ptr::null_mut;
 
+use crossbeam_queue::SegQueue;
 use parking_lot::lock_api::RawMutex;
 
 use crate::{heap::align_down, formatted_size};
@@ -9,7 +10,7 @@ use super::{
     free_list::FreeList,
     heap::Heap,
     region::{HeapRegion, HeapOptions, RegionState},
-    AllocRequest, DynBitmap,
+    AllocRequest, DynBitmap, sweeper::Sweep,
 };
 
 pub struct RegionFreeSet {
@@ -171,6 +172,7 @@ impl RegionFreeSet {
         req: &mut AllocRequest,
         in_new_region: &mut bool,
     ) -> *mut u8 {
+        assert!(!(*region).to_sweep);
         assert!(
             self.alloc_capacity(region) != 0,
             "Should avoid full regions on this path: {}",

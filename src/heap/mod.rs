@@ -1,22 +1,30 @@
+use atomic::{Atomic, Ordering};
+
 pub mod heap;
 pub mod thread;
 pub mod safepoint;
 pub mod bitmap;
 pub mod concurrent_thread;
 pub mod controller;
+pub mod degenerated_gc;
 pub mod free_list;
 pub mod free_set;
 pub mod region;
-pub mod mark_sweep;
+pub mod obj_storage;
+pub mod stw_gc;
+pub mod mark;
+pub mod taskqueue;
 pub mod memory_region;
-pub mod marking;
+pub mod root_processor;
 pub mod virtual_memory;
 pub mod sweeper;
+pub mod concurrent_gc;
 pub mod stack;
 pub mod shared_vars;
+pub mod mark_bitmap;
 pub mod signals;
 pub mod tlab;
-pub mod immix;
+pub mod marking_context;
 
 
 #[inline(always)]
@@ -239,3 +247,46 @@ impl std::iter::FromIterator<bool> for DynBitmap {
 }
 
 
+
+
+pub fn atomic_load<T>(ptr: *const T, ordering: Ordering) -> T
+where
+    T: Copy,
+{
+    unsafe {
+        let atomic: &Atomic<T> = std::mem::transmute(ptr);
+
+        atomic.load(ordering)
+    }
+}
+
+pub fn atomic_store<T>(ptr: *const T, value: T, ordering: Ordering)
+where
+    T: Copy,
+{
+    unsafe {
+        let atomic: &Atomic<T> = std::mem::transmute(ptr);
+        atomic.store(value, ordering);
+    }
+}
+
+pub fn atomic_cmpxchg<T>(data: &T, old: T, new: T) -> T 
+where T: Copy 
+{
+    unsafe {
+        let atomic: &Atomic<T> = std::mem::transmute(data);
+        match atomic.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(val) => val,
+            Err(val) => val
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum DegenPoint {
+    Unset,
+    OutsideCycle,
+    ConcurrentMark,
+    ConcurrentSweep,
+}

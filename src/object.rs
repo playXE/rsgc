@@ -1,7 +1,7 @@
 use core::fmt;
-use std::{any::TypeId, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::NonNull, sync::atomic::AtomicU64};
+use std::{any::{TypeId, Any}, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::{NonNull, null_mut}, sync::atomic::{AtomicU64, AtomicPtr}};
 
-use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry, thread::ThreadInfo}};
+use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry, thread::ThreadInfo, atomic_load, atomic_store}};
 
 use super::traits::*;
 
@@ -323,22 +323,64 @@ pub struct Handle<T: Object + ?Sized> {
 
 impl<T: Object + ?Sized> Handle<T> {
     
+    #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
+
+    #[inline]
     pub fn as_ref(&self) -> &T where T: Sized {
         unsafe { self.ptr.cast::<T>().as_ref() }
     }
+
+    #[inline]
     pub fn as_mut(&mut self) -> &'_ mut T 
     where T: Sized 
     {
         unsafe { self.ptr.cast().as_mut() }
     }
 
+    #[inline]
     pub unsafe fn from_raw(mem: *mut u8) -> Self {
         Self {
             ptr: NonNull::new_unchecked(mem),
             marker: PhantomData
+        }
+    }
+
+    #[inline]
+    pub fn vtable(&self) -> &'static VTable {
+        unsafe {
+            let entry = self.ptr.as_ptr().cast::<HeapObjectHeader>().sub(1);
+            (*entry).vtable()
+        }
+    }
+
+    #[inline]
+    pub fn as_dyn(this: &Self) -> Handle<dyn Object> {
+        Handle {
+            ptr: this.ptr,
+            marker: Default::default()
+        }
+    }
+    #[inline]
+    pub fn make_atomic(this: &Self) -> AtomicHandle<T> {
+        AtomicHandle {
+            ptr: this.ptr.as_ptr(),
+            marker: Default::default()
+        }
+    }
+}
+
+impl Handle<dyn Object> {
+    pub fn downcast<U: Object + Sized + 'static>(self) -> Option<Handle<U>> {
+        if self.vtable().type_id == TypeId::of::<U>() {
+            Some(Handle {
+                ptr: self.ptr,
+                marker: Default::default()
+            })
+        } else {
+            None
         }
     }
 }
@@ -444,4 +486,67 @@ impl<T: Object + Sized> Allocation for Array<T> {
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
     const VARSIZE_OFFSETOF_LENGTH: usize = 0;
     const VARSIZE_OFFSETOF_VARPART: usize = size_of::<usize>();
+}
+
+pub struct AtomicHandle<T: Object + ?Sized> {
+    ptr: *mut u8,
+    marker: PhantomData<*const T>
+}
+
+impl<T: Object + ?Sized> AtomicHandle<T> {
+    pub fn null() -> Self {
+        Self {
+            ptr: null_mut(),
+            marker: PhantomData
+        }
+    }
+
+    pub fn load(&self, order: atomic::Ordering) -> Option<Handle<T>> {
+        Some(Handle {
+            ptr: NonNull::new(atomic_load(&self.ptr, order))?,
+            marker: PhantomData
+        })
+    }
+
+    pub fn store(&self, val: Option<Handle<T>>, order: atomic::Ordering) {
+        atomic_store(&self.ptr, val.map(|o| o.ptr.as_ptr()).unwrap_or(null_mut()), order)
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.load_relaxed().is_none()
+    }
+
+    pub fn load_relaxed(&self) -> Option<Handle<T>> {
+        self.load(atomic::Ordering::Relaxed)
+    }
+
+    pub fn store_relaxed(&self, val: Option<Handle<T>>) {
+        self.store(val, atomic::Ordering::Relaxed);
+    }
+
+    pub fn load_acquire(&self) -> Option<Handle<T>> {
+        self.load(atomic::Ordering::Acquire)
+    }
+
+    pub fn store_release(&self, val: Option<Handle<T>>) {
+        self.store(val, atomic::Ordering::Release);
+    }
+}
+
+impl<T: Object + ?Sized> Clone for AtomicHandle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Object + ?Sized> Copy for AtomicHandle<T> {}
+unsafe impl<T: Object + ?Sized> Send for AtomicHandle<T> {}
+unsafe impl<T: Object + ?Sized> Sync for AtomicHandle<T> {}
+
+impl<T: Object + ?Sized> Object for AtomicHandle<T> {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        if let Some(handle) = self.load_acquire() {
+            visitor.visit(handle.ptr.as_ptr());
+        }
+    }
 }

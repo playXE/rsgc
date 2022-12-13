@@ -1,7 +1,16 @@
-#![feature(const_type_id, const_type_name, panic_always_abort, core_intrinsics, specialization)]
+#![feature(
+    const_type_id,
+    const_refs_to_cell,
+    const_type_name,
+    panic_always_abort,
+    ptr_metadata,
+    core_intrinsics,
+    specialization,
+    ptr_sub_ptr
+)]
 #![allow(dead_code, unused_imports, incomplete_features)]
 
-use std::{sync::atomic::AtomicPtr, cell::UnsafeCell};
+use std::{cell::UnsafeCell, sync::atomic::AtomicPtr};
 
 pub const MEM_KIND_DYNAMIC: i32 = 0;
 pub const MEM_KIND_RAW: i32 = 1;
@@ -17,17 +26,17 @@ pub const fn mem_has_ptr(p: i32) -> bool {
 //pub mod gc;
 //pub mod arena;
 //pub mod weak_random;
-pub mod env;
-pub mod sync;
-pub mod object;
 pub mod bitfield;
+pub mod env;
 pub mod heap;
+pub mod object;
+pub mod sync;
 pub mod traits;
+pub mod utils;
 
 pub struct FormattedSize {
     pub size: usize,
 }
-
 
 impl std::fmt::Display for FormattedSize {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
