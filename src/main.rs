@@ -1,4 +1,4 @@
-use rsgc::heap::thread;
+use rsgc::heap::{thread, GCHeuristic};
 use rsgc::{
     env::read_uint_from_env,
     heap::{heap::Heap, region::HeapArguments, thread::ThreadInfo},
@@ -129,17 +129,8 @@ fn bench() {
 
 fn main() {
     env_logger::init();
-    let args = HeapArguments::from_env();
-
+    let mut args = HeapArguments::from_env();
+    args.learning_steps = 3;
     let _ = Heap::new(args);
-    let mut handles = vec![];
-    for _ in 0..1 {
-        handles.push(thread::spawn(|| {
-            bench();
-        }));
-    }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
+    bench();
 }

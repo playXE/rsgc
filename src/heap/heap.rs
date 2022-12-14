@@ -24,7 +24,7 @@ use super::{
     safepoint,
     shared_vars::{SharedFlag, SharedEnumFlag},
     virtual_memory::{self, VirtualMemory},
-    AllocRequest, thread::{thread, thread_no_register, SafeScope},
+    AllocRequest, thread::{thread, thread_no_register, SafeScope}, heuristics::{Heuristics, compact::CompactHeuristics, adaptive::AdaptiveHeuristics}, GCHeuristic,
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use scoped_thread_pool::Pool;
@@ -39,7 +39,7 @@ pub struct Heap {
     mem: Box<VirtualMemory>,
     regions_storage: Box<VirtualMemory>,
     regions: Vec<*mut HeapRegion>,
-    opts: HeapOptions,
+    opts: Box<HeapOptions>,
     free_set: RegionFreeSet,
     initial_size: usize,
     minimum_size: usize,
@@ -50,14 +50,13 @@ pub struct Heap {
     controller_thread: Option<&'static mut ControlThread>,
     progress_last_gc: SharedFlag,
     object_start_bitmap: HeapBitmap<16>,
-
+    heuristics: Box<dyn Heuristics>,
     weak_refs: Vec<*mut HeapObjectHeader>,
     global_roots: Vec<Box<dyn GlobalRoot>>,
     scoped_pool: scoped_thread_pool::Pool,
 
     marking_context: &'static mut MarkingContext,
     cancelled_gc: SharedEnumFlag,
-    degenerate_cycles_in_a_row: usize,
 }
 
 pub const GC_CANCELLABLE: u8 = 0;
@@ -65,6 +64,10 @@ pub const GC_CANCELLED: u8 = 1;
 pub const GC_NOT_CANCELLED: u8 = 2;
 
 impl Heap {
+    pub unsafe fn options_mut(&mut self) -> &mut HeapOptions {
+        &mut self.opts
+    }
+
     pub fn free_set(&self) -> &RegionFreeSet {
         &self.free_set
     }
@@ -93,7 +96,8 @@ impl Heap {
         safepoint::init();
         SuspendibleThreadSet::init();
         args.set_heap_size();
-        let opts = HeapRegion::setup_sizes(&args);
+        let heuristics = args.heuristics;
+        let mut opts = HeapRegion::setup_sizes(&args);
 
         let init_byte_size = args.initial_heap_size;
         let min_byte_size = args.min_heap_size;
@@ -138,13 +142,20 @@ impl Heap {
         .unwrap();
         let free_set = RegionFreeSet::new(&opts);
 
+        let heuristics = match heuristics {
+            GCHeuristic::Adaptive => AdaptiveHeuristics::new(&opts),
+            GCHeuristic::Compact => CompactHeuristics::new(&mut opts),
+            _ => todo!()
+        };
+
         let this = Box::leak(Box::new(Self {
             object_start_bitmap: HeapBitmap::new(mem.start(), mem.size()),
             regions: vec![null_mut(); opts.region_count],
             regions_storage: regions_mem,
             mem,
+            heuristics,
             is_concurrent_mark_in_progress: SharedFlag::new(),
-            opts,
+            opts: Box::new(opts),
             initial_size,
             minimum_size,
             commited: AtomicUsize::new(initial_size),
@@ -160,7 +171,6 @@ impl Heap {
             scoped_pool: scoped_thread_pool::Pool::new(opts.parallel_gc_threads),
             marking_context: mark_ctx,
             cancelled_gc: SharedEnumFlag::new(),
-            degenerate_cycles_in_a_row: 0
         }));
         let ptr = this as *mut Heap;
         for i in 0..opts.region_count {
@@ -289,6 +299,10 @@ impl Heap {
         self.increase_allocated(bytes);
     }
 
+    pub fn bytes_allocated_since_gc_start(&self) -> usize {
+        self.bytes_allocated_since_gc_start.load(Ordering::Relaxed)
+    }
+
     pub fn notify_gc_progress(&self) {
         self.progress_last_gc.set();
     }
@@ -383,21 +397,12 @@ impl Heap {
         }
     }
 
-    pub fn should_degenerate_cycle(&self) -> bool {
-        self.degenerate_cycles_in_a_row <= self.options().full_gc_threshold
+    pub fn heuristics(&self) -> &dyn Heuristics {
+        &*self.heuristics
     }
 
-    pub fn record_success_concurrent(&mut self) {
-        self.degenerate_cycles_in_a_row = 0;
-        
-    }
-
-    pub fn record_success_degenerate(&mut self) {
-        self.degenerate_cycles_in_a_row += 1;
-    }
-
-    pub fn record_success_full(&mut self) {
-        self.degenerate_cycles_in_a_row = 0;
+    pub fn heuristics_mut(&mut self) -> &mut dyn Heuristics {
+        &mut *self.heuristics
     }
 
     pub fn should_start_gc(&self) -> bool {

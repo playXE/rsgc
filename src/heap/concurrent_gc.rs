@@ -96,6 +96,7 @@ impl ConcurrentGC {
                     heap: heap(),
                     live: AtomicUsize::new(0),
                     concurrent: true,
+                    freed: AtomicUsize::new(0),
                 };
                 self.heap.parallel_heap_region_iterate_with_cancellation(&sweep);
                 let sweep_end = sweep_start.elapsed();
@@ -112,7 +113,7 @@ impl ConcurrentGC {
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
 
-                log::debug!(target: "gc", "Concurrent GC end in {} msecs ({} msecs sweep), {} live regions after sweep", start.elapsed().as_millis(), sweep_end.as_millis(), sweep.live.load(atomic::Ordering::Relaxed));
+                log::debug!(target: "gc", "Concurrent GC end in {} msecs ({} msecs sweep), Region: {} live, {} freed", start.elapsed().as_millis(), sweep_end.as_millis(), sweep.live.load(atomic::Ordering::Relaxed), sweep.freed.load(atomic::Ordering::Relaxed));
             }
 
             true

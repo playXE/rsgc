@@ -312,7 +312,7 @@ impl ActiveArray {
     pub fn decrement_refcount(&self) -> bool {
         let new_value = self.refcount.fetch_sub(1, atomic::Ordering::Release) - 1 ;
         assert!(new_value >= 0, "negative refcount: {}", new_value);
-        new_value == 1
+        new_value == 0
     }
 
     pub fn push(&mut self, block: *mut Block) -> bool {
@@ -343,5 +343,22 @@ impl ActiveArray {
         }
     }
 
-    
+    pub fn copy_from(&mut self, from: &Self) {
+        let count = from.block_count();
+        assert!(count <= self.size, "precondition");
+
+        unsafe {
+            let mut from_ptr = from.block_ptr(0);
+            let mut to_ptr = self.block_ptr(0);
+
+            for _ in 0..count {
+                let block = from_ptr.read();
+                from_ptr = from_ptr.add(1);
+                *to_ptr = block;
+                to_ptr = to_ptr.add(1);
+            }
+
+            self.block_count.store(count, Ordering::Relaxed);
+        }
+    }
 }

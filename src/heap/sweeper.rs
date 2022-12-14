@@ -14,6 +14,7 @@ pub struct SweepGarbageClosure {
     pub heap: &'static Heap,
     pub concurrent: bool,
     pub live: AtomicUsize,
+    pub freed: AtomicUsize
 }
 
 impl SweepGarbageClosure {
@@ -64,6 +65,7 @@ impl SweepGarbageClosure {
         }
 
         if start_of_gap != end {
+           
             let size = (*region).bottom() + heap.options().region_size_bytes - start_of_gap;
             (*region).free_list.add(start_of_gap as _, size);
             (*region).largest_free_list_entry =
@@ -158,6 +160,7 @@ impl HeapRegionClosure for SweepGarbageClosure {
                     let humongous_obj = (*r).bottom() as *mut HeapObjectHeader;
 
                     if !self.heap.marking_context().is_marked(humongous_obj) {
+                        self.freed.fetch_add(self.heap.options().required_regions((*humongous_obj).heap_size()), atomic::Ordering::AcqRel);
                         self.heap.trash_humongous_region_at(r);
                     } else {
                         self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -167,6 +170,7 @@ impl HeapRegionClosure for SweepGarbageClosure {
                     // todo: assertion that the previous region is a humongous start and has live object
                 } else if (*r).is_regular() {
                     if Self::sweep_region(self.heap, r) {
+                        self.freed.fetch_add(1, atomic::Ordering::AcqRel);
                         (*r).make_trash();
                     } else {
                         self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel);

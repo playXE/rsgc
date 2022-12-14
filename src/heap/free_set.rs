@@ -251,7 +251,6 @@ impl RegionFreeSet {
         if num > self.mutator_count() {
             return null_mut();
         }
-
         // Find the continuous interval of $num regions, starting from $beg and ending in $end,
         // inclusive. Contiguous allocations are biased to the beginning.
         let mut beg = self.mutator_leftmost;

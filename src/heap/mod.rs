@@ -23,6 +23,7 @@ pub mod stack;
 pub mod shared_vars;
 pub mod mark_bitmap;
 pub mod signals;
+pub mod heuristics;
 pub mod tlab;
 pub mod marking_context;
 
@@ -289,4 +290,26 @@ pub enum DegenPoint {
     OutsideCycle,
     ConcurrentMark,
     ConcurrentSweep,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum GCHeuristic {
+    Adaptive,
+    Agressive,
+    Compact,
+    Passive,
+    Static
+}
+
+impl GCHeuristic {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "adaptive" => GCHeuristic::Adaptive,
+            "agressive" => GCHeuristic::Agressive,
+            "compact" => GCHeuristic::Compact,
+            "passive" => GCHeuristic::Passive,
+            "static" => GCHeuristic::Static,
+            _ => panic!("Unknown GC heuristic: {}", s)
+        }
+    } 
 }

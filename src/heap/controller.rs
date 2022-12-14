@@ -31,6 +31,7 @@ pub struct ControlThread {
 
     alloc_failure_waiters_lock: Monitor<()>,
     gc_waiters_lock: Monitor<()>,
+    degen_point: DegenPoint
 }
 
 impl ControlThread {
@@ -47,7 +48,8 @@ impl ControlThread {
             terminator_lock: Mutex::new(()),
             gc_id: AtomicUsize::new(0),
             alloc_failure_waiters_lock: Monitor::new(()),
-            gc_waiters_lock: Monitor::new(())
+            gc_waiters_lock: Monitor::new(()),
+            degen_point: DegenPoint::Unset
         }));
 
         let ptr = thread as *mut ControlThread as usize;
@@ -183,6 +185,59 @@ impl ControlThread {
             heap.entry_uncommit(shrink_before, shrink_until);
         }
     }
+
+    fn check_cancellation_or_degen(&mut self, point: DegenPoint) -> bool {
+        let heap = heap();
+        if heap.cancelled_gc() {
+            if !self.in_graceful_shutdown() {
+                self.degen_point = point;
+            }
+
+            return true;
+        }
+
+        false
+    }
+
+    fn service_concurrent_normal_cycle(&mut self) {
+        if self.check_cancellation_or_degen(DegenPoint::OutsideCycle) {
+            return;
+        }
+
+        let heap = heap();
+        let session = GCSession::new();
+        let mut gc = ConcurrentGC::new();
+
+        if gc.collect() {
+            heap.heuristics_mut().record_success_concurrent();
+        } else {
+            assert!(heap.cancelled_gc(), "must have been cancelled");
+            self.check_cancellation_or_degen(gc.degen_point());
+        }
+        drop(session);
+    }
+
+    fn service_stw_full_cycle(&mut self) {
+        let session = GCSession::new();
+
+        let mut gc = StopTheWorldGC::new();
+
+        unsafe { gc.do_collect(); }
+        heap().heuristics_mut().record_success_full();
+
+        drop(session);
+    }
+
+    fn service_stw_degenerated_cycle(&mut self, point: DegenPoint) {
+        let session = GCSession::new();
+
+        let mut gc = DegeneratedGC::new(point);
+
+        unsafe { gc.collect(); }
+        heap().heuristics_mut().record_success_degenerated();
+
+        drop(session);
+    }
 }
 
 
@@ -206,7 +261,7 @@ impl ConcurrentGCThread for ControlThread {
         // shrinking with lag of less than 1/10-th of true delay.
         // uncommit_delay is in msecs, but shrink_period is in seconds.
         let shrink_period = heap.options().uncommit_delay as f64 / 1000.0 / 10.0;
-
+        let mut degen_point;
         let mut sleep = heap.options().control_interval_min;
         while !self.in_graceful_shutdown() && !self.should_terminate() {
             let alloc_failure_pending = self.alloc_failure_gc.is_set();
@@ -214,18 +269,23 @@ impl ConcurrentGCThread for ControlThread {
 
             let mut mode = GCMode::None;
 
+            degen_point = std::mem::replace(&mut self.degen_point, DegenPoint::OutsideCycle);
+
             if alloc_failure_pending {
                 log::info!(target: "gc", "Trigger: Handle allocation failure");
-                if heap.should_degenerate_cycle() {
+                if heap.heuristics().should_degenerate_cycle() {
+                    heap.heuristics_mut().record_allocation_failure_gc();
                     mode = GCMode::STWDegen;
                 } else {
+                    heap.heuristics_mut().record_allocation_failure_gc();
                     mode = GCMode::STWFull;
                 }
             } else if explicit_gc_requested {
+                heap.heuristics_mut().record_requested_gc();
                 log::info!(target: "gc", "Trigger: Explicit GC request");
                 mode = GCMode::STWFull;
             } else {
-                if heap.should_start_gc() {
+                if heap.heuristics_mut().should_start_gc() {
                     mode = GCMode::Concurrent;
                 }
             }
@@ -255,29 +315,17 @@ impl ConcurrentGCThread for ControlThread {
                     {
                         match mode {
                             GCMode::Concurrent => {
-                                let mut collector = ConcurrentGC::new();
-
-                                if !collector.collect() {
-                                    let mut degen = DegeneratedGC::new(collector.degen_point());
-                                    degen.collect();
-                                    heap.record_success_degenerate();
-                                } else {
-                                    heap.record_success_concurrent();
-                                }
+                                self.service_concurrent_normal_cycle();
                             }
                             GCMode::STWDegen => {
-                                let mut collector = DegeneratedGC::new(DegenPoint::OutsideCycle);
-
-                                collector.collect();
-                                heap.record_success_degenerate();
+                                self.service_stw_degenerated_cycle(degen_point);
                             }
+
                             GCMode::STWFull => {
-                                let mut collector = StopTheWorldGC::new();
-
-                                collector.do_collect();
-                                heap.record_success_full();
+                                self.service_stw_full_cycle();
                             }
-                            _ => ()
+
+                            _ => unreachable!()
                         }
                        
                     }
@@ -363,5 +411,21 @@ impl ConcurrentGCThread for ControlThread {
 
     fn create_and_start(&mut self) {
         
+    }
+}
+
+pub struct GCSession {
+
+}
+
+impl GCSession {
+    pub fn new() -> Self {
+        heap().heuristics_mut().record_cycle_start();
+        Self {}
+    }
+}
+impl Drop for GCSession {
+    fn drop(&mut self) {
+        heap().heuristics_mut().record_cycle_end();
     }
 }

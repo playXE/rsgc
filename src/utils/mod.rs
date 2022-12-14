@@ -3,6 +3,7 @@ use std::mem::size_of;
 pub mod stack;
 pub mod taskqueue;
 pub mod free_list_allocator;
+pub mod number_seq;
 pub mod ptr_queue;
 
 pub const fn nth_bit(n: usize) -> usize {

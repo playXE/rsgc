@@ -298,8 +298,9 @@ impl HeapObjectHeader {
             return;
         }
 
+        assert!(VtableTag::decode(self.word) != 0, "null vtable for object {:p}", self);
         let vt = self.vtable();
-
+        
         (vt.trace)(self.data() as _, visitor);
     }
 

@@ -207,7 +207,7 @@ impl<'a> MarkingTask<'a> {
                 break;
             } else {
                 let stsl = SuspendibleThreadSetLeaver::new(CANCELLABLE);
-                if !self.heap.cancelled_gc() && self.terminator.try_terminate() {
+                if self.terminator.try_terminate() {
                     break;
                 }
                 drop(stsl);

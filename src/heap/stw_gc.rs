@@ -58,6 +58,7 @@ impl StopTheWorldGC {
             concurrent: false,
             heap: heap(),
             live: AtomicUsize::new(0),
+            freed: AtomicUsize::new(0),
         };
 
         if self.heap.options().parallel_sweep {

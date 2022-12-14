@@ -17,6 +17,9 @@ env_logger = "0.10"
 scoped-thread-pool = "1.0"
 paste = "1.0"
 crossbeam-deque = "0.8"
+crossbeam-queue = "0.3"
+atomic = "0.5"
+error-code = "2.3"
 [dependencies.memoffset]
 version = "0.7"
 features = ["unstable_const"]
@@ -35,3 +38,11 @@ winapi = { version = "0.3", features = [
 [features]
 conditional-safepoint = []
 
+[dev-dependencies]
+criterion = { version = "0.4", features = ["html_reports"] }
+gc = "0.4"
+gc_derive = "0.4"
+
+[[bench]]
+name = "binarytrees"
+harness = false

@@ -69,6 +69,7 @@ impl DegeneratedGC {
             let sweep = SweepGarbageClosure {
                 live: AtomicUsize::new(0),
                 heap: heap(),
+                freed: AtomicUsize::new(0),
                 concurrent: false 
             };
             self.heap

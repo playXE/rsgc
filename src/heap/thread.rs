@@ -67,6 +67,7 @@ impl ThreadInfo {
             obj.add(1).cast::<T>().write(value);
             // For SATB all objects must be marked at allocation if concurrent mark is running
             (*self.mark_ctx).mark(obj as _);
+            
             Handle::from_raw(obj.add(1).cast())
         }
     }
@@ -206,7 +207,7 @@ impl ThreadInfo {
         if !(*self.cm_in_progress).is_set() {
             return;
         }
-
+        
         if !(*self.mark_ctx).is_marked(obj) {
             *self.queue.get_unchecked_mut(self.queue_index) = obj;
             self.queue_index += 1;

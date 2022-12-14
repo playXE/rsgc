@@ -32,6 +32,7 @@ impl MarkingContext {
     /// Marks the object. Returns true if the object has not been marked before and has
     /// been marked by this thread. Returns false if the object has already been marked,
     /// or if a competing thread succeeded in marking this object.
+    
     pub fn mark(&self, obj: *const HeapObjectHeader) -> bool {
         self.mark_bit_map.atomic_test_and_set(obj as _)
     }

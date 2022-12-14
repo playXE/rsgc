@@ -5,6 +5,7 @@ use crate::env::{get_total_memory, read_float_from_env};
 use crate::heap::heap::heap;
 use crate::{env::read_uint_from_env, formatted_size};
 
+use super::GCHeuristic;
 use super::virtual_memory::VirtualMemory;
 use super::{align_down, bitmap::HeapBitmap, free_list::FreeList, virtual_memory};
 
@@ -49,7 +50,7 @@ pub struct HeapRegion {
     pub(crate) largest_free_list_entry: usize,
     pub(crate) last_sweep_free: usize,
     pub empty_time: Instant,
-    pub to_sweep: bool
+    pub to_sweep: bool,
 }
 
 #[derive(Debug)]
@@ -89,7 +90,17 @@ pub struct HeapArguments {
     pub max_satb_buffer_flushes: usize,
     pub max_satb_buffer_size: usize,
     pub full_gc_threshold: usize,
-    pub always_full: bool
+    pub always_full: bool,
+    pub adaptive_decay_factor: f64,
+    pub learning_steps: usize,
+    pub immediate_threshold: usize,
+    pub adaptive_sample_frequency_hz: usize,
+    pub adaptive_sample_frequency_size_seconds: usize,
+    pub adaptive_initial_confidence: f64,
+    pub adaptive_initial_spike_threshold: f64,
+    pub alloc_spike_factor: usize,
+    pub heuristics: GCHeuristic,
+    pub init_free_threshold: usize
 }
 
 impl HeapArguments {
@@ -160,12 +171,12 @@ impl HeapArguments {
 
         match read_uint_from_env("GC_INITIAL_HEAP_SIZE") {
             Some(x) => this.initial_heap_size = x,
-            None => ()
+            None => (),
         }
 
         match read_uint_from_env("GC_MIN_HEAP_SIZE") {
             Some(x) => this.min_heap_size = x,
-            None => ()
+            None => (),
         }
 
         match read_uint_from_env("GC_MIN_FREE_THRESHOLD") {
@@ -230,12 +241,12 @@ impl HeapArguments {
 
         match read_float_from_env("GC_MIN_RAM_PERCENTAGE") {
             Some(x) => this.min_ram_percentage = x,
-            None => ()
+            None => (),
         }
 
         match read_float_from_env("GC_MAX_RAM_PERCENTAGE") {
             Some(x) => this.max_ram_percentage = x,
-            None => ()
+            None => (),
         }
 
         match read_float_from_env("GC_INITIAL_RAM_PERCENTAGE") {
@@ -243,30 +254,34 @@ impl HeapArguments {
             None => (),
         }
 
-
         match read_uint_from_env("GC_MARK_LOOP_STRIDE") {
             Some(x) => this.mark_loop_stride = x,
-            None => ()
+            None => (),
         }
 
         match read_uint_from_env("GC_MAX_SATB_BUFFER_FLUSHES") {
             Some(x) => this.max_satb_buffer_flushes = x,
-            None => ()
+            None => (),
         }
 
         match read_uint_from_env("GC_MAX_SATB_BUFFER_SIZE") {
             Some(x) => this.max_satb_buffer_size = x,
-            None => ()
+            None => (),
         }
 
         match read_uint_from_env("GC_FULL_GC_THRESHOLD") {
             Some(x) => this.full_gc_threshold = x,
-            None => ()
+            None => (),
         }
 
         match read_uint_from_env("GC_ALWAYS_FULL") {
             Some(x) => this.always_full = x > 0,
-            None => ()
+            None => (),
+        }
+
+        match read_float_from_env("GC_ADAPTIVE_DECAY_FACTOR") {
+            Some(x) => this.adaptive_decay_factor = x,
+            None => (),
         }
 
         this
@@ -317,7 +332,6 @@ impl HeapArguments {
                 self.min_heap_size = reasonable_minimum;
             }
         }
-
     }
 }
 
@@ -332,7 +346,7 @@ impl Default for HeapArguments {
             region_size: 0,
             elastic_tlab: false,
             min_free_threshold: 10,
-            allocation_threshold: 10,
+            allocation_threshold: 0,
             guaranteed_gc_interval: 5 * 60 * 1000,
             uncommit: true,
             uncommit_delay: 5 * 60 * 1000,
@@ -354,15 +368,27 @@ impl Default for HeapArguments {
             tlab_waste_increment: 4,
             tlab_waste_target_percent: 1,
             parallel_region_stride: 1024,
-            parallel_gc_threads: std::thread::available_parallelism().map(|x| x.get() / 2).unwrap_or(2),
+            parallel_gc_threads: std::thread::available_parallelism()
+                .map(|x| x.get() / 2)
+                .unwrap_or(2),
             max_satb_buffer_flushes: 5,
             max_satb_buffer_size: 1024,
-            full_gc_threshold: 3
+            full_gc_threshold: 3,
+            adaptive_decay_factor: 0.5,
+            adaptive_initial_confidence: 1.8,
+            adaptive_initial_spike_threshold: 1.8,
+            adaptive_sample_frequency_hz: 10,
+            adaptive_sample_frequency_size_seconds: 10,
+            alloc_spike_factor: 5,
+            learning_steps: 5,
+            immediate_threshold: 90,
+            heuristics: GCHeuristic::Adaptive,
+            init_free_threshold: 70
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Default, Debug)]
 pub struct HeapOptions {
     pub region_size_bytes: usize,
     pub region_size_words: usize,
@@ -398,7 +424,16 @@ pub struct HeapOptions {
     pub max_satb_buffer_flushes: usize,
     pub max_satb_buffer_size: usize,
     pub full_gc_threshold: usize,
-    pub always_full: bool
+    pub always_full: bool,
+    pub adaptive_decay_factor: f64,
+    pub learning_steps: usize,
+    pub immediate_threshold: usize,
+    pub adaptive_sample_frequency_hz: usize,
+    pub adaptive_sample_frequency_size_seconds: usize,
+    pub adaptive_initial_confidence: f64,
+    pub adaptive_initial_spike_threshold: f64,
+    pub alloc_spike_factor: usize,
+    pub init_free_threshold: usize
 }
 
 impl HeapOptions {
@@ -601,7 +636,6 @@ impl HeapRegion {
         self.object_start_bitmap.clear();
         self.used = 0;
         self.largest_free_list_entry = self.size();
-        
     }
 
     pub fn largest_free_list_entry(&self) -> usize {
@@ -666,6 +700,16 @@ impl HeapRegion {
         opts.max_satb_buffer_size = args.max_satb_buffer_size;
         opts.full_gc_threshold = args.full_gc_threshold;
         opts.always_full = args.always_full;
+        opts.adaptive_decay_factor = args.adaptive_decay_factor;
+        opts.learning_steps = args.learning_steps;
+        opts.immediate_threshold = args.immediate_threshold;
+        opts.adaptive_sample_frequency_hz = args.adaptive_sample_frequency_hz;
+        opts.adaptive_sample_frequency_size_seconds = args.adaptive_sample_frequency_size_seconds;
+        opts.adaptive_initial_confidence = args.adaptive_initial_confidence;
+        opts.adaptive_initial_spike_threshold = args.adaptive_initial_spike_threshold;
+        opts.alloc_spike_factor = args.alloc_spike_factor;
+        opts.init_free_threshold = args.init_free_threshold;
+        
         let min_region_size = if args.min_region_size < Self::MIN_REGION_SIZE {
             Self::MIN_REGION_SIZE
         } else {
@@ -743,8 +787,13 @@ impl HeapRegion {
         };
         opts.max_tlab_size = opts.min_tlab_size.max(opts.max_tlab_size);
         opts.elastic_tlab = args.elastic_tlab;
+        if opts.tlab_size != 0 {
+            opts.tlab_size = opts.tlab_size.min(opts.humongous_threshold_bytes);
+        }
 
-        if opts.parallel_region_stride == 0 && opts.parallel_gc_threads != 0 || opts.parallel_region_stride == 1024 {
+        if opts.parallel_region_stride == 0 && opts.parallel_gc_threads != 0
+            || opts.parallel_region_stride == 1024
+        {
             opts.parallel_region_stride = opts.region_count / opts.parallel_gc_threads;
         }
 
@@ -754,7 +803,7 @@ impl HeapRegion {
         log::info!(target: "gc", "- Region size: {}", formatted_size(opts.region_size_bytes));
         log::info!(target: "gc", "- Humongous threshold: {}", formatted_size(opts.humongous_threshold_bytes));
         log::info!(target: "gc", "- Max TLAB size: {}", formatted_size(opts.max_tlab_size));
-
+        log::info!(target: "gc", "- TLAB size: {}", formatted_size(opts.tlab_size));
         opts
     }
 }

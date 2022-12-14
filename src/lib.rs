@@ -35,7 +35,7 @@ pub mod traits;
 pub mod utils;
 
 pub struct FormattedSize {
-    pub size: usize,
+    pub size: f64,
 }
 
 impl std::fmt::Display for FormattedSize {
@@ -69,7 +69,11 @@ impl std::fmt::Debug for FormattedSize {
 }
 
 pub fn formatted_size(size: usize) -> FormattedSize {
-    FormattedSize { size }
+    FormattedSize { size: size as f64 }
+}
+
+pub fn formatted_sizef(size: f64) -> FormattedSize {
+    FormattedSize { size: size as f64 }
 }
 
 static mut SINK: usize = 0;
