@@ -14,13 +14,17 @@ use crate::object::HeapObjectHeader;
 use crate::traits::Visitor;
 use parking_lot::lock_api::RawMutex;
 use parking_lot::MutexGuard;
-pub struct StopTheWorldGC {
+
+/// This implements Full GC (e.g. when invoking [Heap::request_gc](crate::heap::heap::Heap::request_gc)) using a mark-and-sweep algorithm.
+/// 
+/// It is done in fully stop-the-world.
+pub struct FullGC {
     heap: &'static mut Heap,
     mark_stack: Vec<*mut HeapObjectHeader>,
     mark_ctx: &'static MarkingContext,
 }
 
-impl StopTheWorldGC {
+impl FullGC {
     pub fn new() -> Self {
         Self {
             heap: heap(),
@@ -171,7 +175,7 @@ impl StopTheWorldGC {
     }
 }
 
-impl Visitor for StopTheWorldGC {
+impl Visitor for FullGC {
     fn visit(&mut self, object: *const u8) {
         self.try_mark(object);
     }

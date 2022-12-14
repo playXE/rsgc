@@ -2,7 +2,7 @@ use std::{sync::{atomic::{AtomicBool, Ordering, AtomicUsize}, Arc}, time::{Insta
 
 use parking_lot::{Mutex, Condvar, lock_api::RawMutex};
 
-use crate::{sync::monitor::Monitor, formatted_size, heap::{stw_gc::StopTheWorldGC, concurrent_gc::ConcurrentGC, degenerated_gc::DegeneratedGC, DegenPoint}};
+use crate::{sync::monitor::Monitor, formatted_size, heap::{full_gc::FullGC, concurrent_gc::ConcurrentGC, degenerated_gc::DegeneratedGC, DegenPoint}};
 
 use super::{shared_vars::SharedFlag, concurrent_thread::ConcurrentGCThread, heap::heap, AllocRequest};
 
@@ -220,7 +220,7 @@ impl ControlThread {
     fn service_stw_full_cycle(&mut self) {
         let session = GCSession::new();
 
-        let mut gc = StopTheWorldGC::new();
+        let mut gc = FullGC::new();
 
         unsafe { gc.do_collect(); }
         heap().heuristics_mut().record_success_full();

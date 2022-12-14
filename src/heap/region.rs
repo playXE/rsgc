@@ -5,8 +5,8 @@ use crate::env::{get_total_memory, read_float_from_env};
 use crate::heap::heap::heap;
 use crate::{env::read_uint_from_env, formatted_size};
 
-use super::GCHeuristic;
 use super::virtual_memory::VirtualMemory;
+use super::GCHeuristic;
 use super::{align_down, bitmap::HeapBitmap, free_list::FreeList, virtual_memory};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -55,10 +55,22 @@ pub struct HeapRegion {
 
 #[derive(Debug)]
 pub struct HeapArguments {
-    pub min_region_size: usize,
+    /// With automatic region sizing, the regions would be at most 
+    /// this large.
     pub max_region_size: usize,
+    /// With automatic region sizing, the regions would be at least
+    /// this large.
+    pub min_region_size: usize,
+    /// With automatic region sizing, this is the approximate number 
+    /// of regions that would be used, within min/max region size
+    /// limits."
     pub target_num_regions: usize,
+    /// Humongous objects are allocated in separate regions.
+    /// This setting defines how large the object should be to be
+    /// deemed humongous. Value is in  percents of heap region size. 
+    /// This also caps the maximum TLAB size.
     pub humongous_threshold: usize,
+    /// Static heap region size. Set zero to enable automatic sizing.
     pub region_size: usize,
     pub elastic_tlab: bool,
     pub min_tlab_size: usize,
@@ -90,6 +102,7 @@ pub struct HeapArguments {
     pub max_satb_buffer_flushes: usize,
     pub max_satb_buffer_size: usize,
     pub full_gc_threshold: usize,
+    /// Always do full GC cycle.
     pub always_full: bool,
     pub adaptive_decay_factor: f64,
     pub learning_steps: usize,
@@ -99,8 +112,17 @@ pub struct HeapArguments {
     pub adaptive_initial_confidence: f64,
     pub adaptive_initial_spike_threshold: f64,
     pub alloc_spike_factor: usize,
+
+    /// GC heuristics to use. This fine-tunes the GC mode selected,
+    /// by choosing when to start the GC, how much to process on each
+    /// cycle, and what other features to automatically enable.
+    /// Possible values are:
+    /// - adaptive - adapt to maintain the given amount of free heap at all times, even during the GC cycle;
+    /// - static -  trigger GC when free heap falls below the threshold;
+    /// - aggressive - run GC continuously;
+    /// - compact - run GC more frequently and with deeper targets to free up more memory.
     pub heuristics: GCHeuristic,
-    pub init_free_threshold: usize
+    pub init_free_threshold: usize,
 }
 
 impl HeapArguments {
@@ -284,6 +306,15 @@ impl HeapArguments {
             None => (),
         }
 
+        this.heuristics = match std::env::var("GC_HEURISTICS") {
+            Ok(x) => match x.to_lowercase().as_str() {
+                "adaptive" => GCHeuristic::Adaptive,
+                "compact" => GCHeuristic::Compact,
+                _ => todo!("unsupported or unknown heuristic: {}", x),
+            },
+            _ => GCHeuristic::Adaptive,
+        };
+
         this
     }
 
@@ -383,7 +414,7 @@ impl Default for HeapArguments {
             learning_steps: 5,
             immediate_threshold: 90,
             heuristics: GCHeuristic::Adaptive,
-            init_free_threshold: 70
+            init_free_threshold: 70,
         }
     }
 }
@@ -433,7 +464,7 @@ pub struct HeapOptions {
     pub adaptive_initial_confidence: f64,
     pub adaptive_initial_spike_threshold: f64,
     pub alloc_spike_factor: usize,
-    pub init_free_threshold: usize
+    pub init_free_threshold: usize,
 }
 
 impl HeapOptions {

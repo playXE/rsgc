@@ -11,7 +11,7 @@ pub mod free_list;
 pub mod free_set;
 pub mod region;
 pub mod obj_storage;
-pub mod stw_gc;
+pub mod full_gc;
 pub mod mark;
 pub mod taskqueue;
 pub mod memory_region;

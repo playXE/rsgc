@@ -34,6 +34,10 @@ pub const GC_STATE_WAITING: i8 = 1;
 //              execute at the same time with the GC.
 pub const GC_STATE_SAFE: i8 = 2;
 
+
+/// GC Mutator. 
+/// 
+/// By using this structure you can allocate, synchronize with GC and insert write barriers.
 pub struct ThreadInfo {
     pub(crate) id: ThreadId,
     pub(crate) tlab: ThreadLocalAllocBuffer,
@@ -52,6 +56,7 @@ pub struct ThreadInfo {
 }
 
 impl ThreadInfo {
+    /// Allocates fixed sized object on the heap. 
     #[inline]
     pub fn allocate_fixed<T: 'static + Allocation>(&mut self, value: T) -> Handle<T> {
         unsafe {
@@ -65,13 +70,18 @@ impl ThreadInfo {
             (*obj).set_finalization_ordering(false);
 
             obj.add(1).cast::<T>().write(value);
-            // For SATB all objects must be marked at allocation if concurrent mark is running
+            // We implement black mutator technique and SATB for concurrent marking. 
+            // 
+            // This means we collect garbage that was allocated *before* the cycle started
+            // and thus all new objects should implicitly be marked as black. This has problem
+            // of floating garbage but it significantly simplifies write barrier implementation.
             (*self.mark_ctx).mark(obj as _);
             
             Handle::from_raw(obj.add(1).cast())
         }
     }
 
+    /// Allocates variably sized object on the heap. 
     pub fn allocate_varsize<T: 'static + Allocation>(
         &mut self,
         length: usize,
@@ -195,6 +205,8 @@ impl ThreadInfo {
     }
 
     
+    /// SATB write barrier. Ensures that object processes all references correctly. 
+    /// Must be inserted after write to `handle`.
     #[inline]
     pub fn write_barrier<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
         unsafe {
@@ -275,9 +287,26 @@ impl ThreadInfo {
         self.last_sp
     }
 
+    /// Returns pointer to safepoint page. When JITing your code you can directly
+    /// inline safepoint poll into your code.
+    pub unsafe fn safepoint_page(&self) -> *mut u8 {
+        self.safepoint
+    }
+
+    /// Returns true if safepoints are conditional in this build of RSGC.
+    pub const fn is_conditional_safepoint() -> bool {
+        cfg!(feature="conditional-safepoint")
+    }
+    
+
     /// Reads from polling page. If safepoint is disabled nothing happens
     /// but when safepoint is enabled this triggers page fault (SIGSEGV/SIGBUS on Linux/macOS/BSD)
     /// and goes into signal to suspend thread.
+    /// 
+    /// # Note
+    /// 
+    /// Enable `conditional-safepoint` feature when running in LLDB/GDB, otherwise safepoint events
+    /// will be treatened as segfault by debuggers.
     #[inline(always)]
     pub fn safepoint(&mut self) {
         std::sync::atomic::compiler_fence(Ordering::SeqCst);
@@ -343,6 +372,7 @@ impl ThreadInfo {
         key
     }
 
+    /// Returns true if thread is registered in a GC.
     pub fn is_registered(&self) -> bool {
         !self.safepoint.is_null() && unsafe { self.safepoint != &mut SINK }
     }
