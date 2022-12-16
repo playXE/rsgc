@@ -5,6 +5,7 @@ use super::heap::{heap, Heap};
 use super::mark::STWMark;
 use super::marking_context::MarkingContext;
 use super::safepoint;
+use crate::heap::PausePhase;
 use crate::heap::concurrent_gc::PrepareUnsweptRegions;
 use crate::heap::controller::GCMode;
 use crate::heap::safepoint::SafepointSynchronize;
@@ -38,21 +39,29 @@ impl FullGC {
 
         let threads = SafepointSynchronize::begin();
         log::debug!(target: "gc-safepoint", "stopped the world ({} thread(s)) in {} ms", threads.len(), start.elapsed().as_millis());
+        let phase = PausePhase::new("Init Mark");
         self.heap.prepare_gc();
         // Phase 0: retire TLABs
         for thread in threads.iter().copied() {
             (*thread).tlab.retire((*thread).id);
         }
+        drop(phase);
         {
+            let phase = PausePhase::new("Marking");
             // Phase 1: Mark
             self.do_mark(threads);
+            drop(phase);
         }
 
         {
+            let phase = PausePhase::new("Process weak refs");
             // Phase 2: Process weak references
             self.heap.process_weak_refs();
+            drop(phase);
         }
-
+        
+            let phase = PausePhase::new("Sweep");
+      
         let prep = PrepareUnsweptRegions {};
 
         self.heap.heap_region_iterate(&prep);
@@ -76,7 +85,7 @@ impl FullGC {
         self.heap.lock.lock();
         self.heap.free_set_mut().rebuild();
         self.heap.lock.unlock();
-
+        drop(phase);
         log::debug!(target: "gc", "STW Mark-and-Sweep done in {} ms, {} live regions after sweep", start.elapsed().as_millis(), closure.live.load(std::sync::atomic::Ordering::Relaxed));
         SafepointSynchronize::end();
     }

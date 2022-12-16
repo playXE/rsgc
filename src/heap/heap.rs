@@ -24,7 +24,7 @@ use super::{
     safepoint,
     shared_vars::{SharedFlag, SharedEnumFlag},
     virtual_memory::{self, VirtualMemory},
-    AllocRequest, thread::{thread, thread_no_register, SafeScope}, heuristics::{Heuristics, compact::CompactHeuristics, adaptive::AdaptiveHeuristics}, GCHeuristic,
+    AllocRequest, thread::{thread, thread_no_register, SafeScope}, heuristics::{Heuristics, compact::CompactHeuristics, adaptive::AdaptiveHeuristics}, GCHeuristic
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use scoped_thread_pool::Pool;
@@ -33,9 +33,11 @@ pub trait GlobalRoot {
     fn walk(&self, visitor: &mut dyn Visitor);
 }
 
+#[repr(C)]
 pub struct Heap {
     pub(crate) lock: Lock,
     pub(crate) is_concurrent_mark_in_progress: SharedFlag,
+    marking_context: &'static mut MarkingContext,
     mem: Box<VirtualMemory>,
     regions_storage: Box<VirtualMemory>,
     regions: Vec<*mut HeapRegion>,
@@ -54,8 +56,6 @@ pub struct Heap {
     weak_refs: Vec<*mut HeapObjectHeader>,
     global_roots: Vec<Box<dyn GlobalRoot>>,
     scoped_pool: scoped_thread_pool::Pool,
-
-    marking_context: &'static mut MarkingContext,
     cancelled_gc: SharedEnumFlag,
 }
 
@@ -91,6 +91,7 @@ impl Heap {
             self.is_concurrent_mark_in_progress.unset();
         }
     }
+
 
     pub fn new(mut args: HeapArguments) -> &'static mut Self {
         safepoint::init();

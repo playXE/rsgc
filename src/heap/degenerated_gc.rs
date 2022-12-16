@@ -6,7 +6,7 @@ use parking_lot::lock_api::RawMutex;
 use crate::heap::{
     concurrent_gc::{ConcMark, PrepareUnsweptRegions},
     mark::STWMark,
-    sweeper::{Sweep, SweepGarbageClosure},
+    sweeper::{Sweep, SweepGarbageClosure}, PausePhase,
 };
 
 use super::{
@@ -47,33 +47,36 @@ impl DegeneratedGC {
             // the heap, most probably heavy humongous fragmentation, or we are very low on free
             // space. It makes little sense to wait for Full GC to reclaim as much as it can, when
             // we can do the most aggressive degen cycle.
-
+            let phase = PausePhase::new("Degenerate GC outside cycle");
             self.heap.prepare_gc();
-            for thread in threads.iter().copied() {
-                (*thread).satb_clear();
-            }
+            let mark = ConcMark::new();
+            mark.cancel();
             let mark = STWMark::new();
 
             mark.mark(threads);
             self.heap.process_weak_refs();
             self.degen_point = DegenPoint::ConcurrentMark;
             self.heap.set_concurrent_mark_in_progress(false);
+            drop(phase);
         }
 
         if self.degen_point == DegenPoint::ConcurrentMark {
             // No fallthrough. Continue mark, handed over from concurrent mark if
             // concurrent mark has yet completed
             if self.heap.is_concurrent_mark_in_progress() {
+                let phase = PausePhase::new("Degenerate GC: Finish Marking");
                 let mark = ConcMark::new();
                 mark.collect_roots(threads); // remark roots and flush SATB buffers
                 mark.finish(threads);
 
                 self.heap.set_concurrent_mark_in_progress(false);
+                drop(phase);
             }
             self.degen_point = DegenPoint::ConcurrentSweep;
         }
 
         if self.degen_point == DegenPoint::ConcurrentSweep {
+            let phase = PausePhase::new("Degenerate GC: Sweep");
             let prep = PrepareUnsweptRegions {};
             self.heap.heap_region_iterate(&prep);
             let sweep = SweepGarbageClosure {
@@ -87,6 +90,7 @@ impl DegeneratedGC {
             self.heap.lock.lock();
             self.heap.free_set_mut().rebuild();
             self.heap.lock.unlock();
+            drop(phase);
             log::debug!(target: "gc", "Degenerate GC end in {} msecs, {} regions alive after sweep", start.elapsed().as_millis(), sweep.live.load(Ordering::Relaxed));
         }
 

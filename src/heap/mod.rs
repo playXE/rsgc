@@ -1,4 +1,8 @@
+use std::time::Instant;
+
 use atomic::{Atomic, Ordering};
+
+use self::heap::heap;
 
 pub mod heap;
 pub mod thread;
@@ -11,9 +15,11 @@ pub mod free_list;
 pub mod free_set;
 pub mod region;
 pub mod obj_storage;
+pub mod write_barrier;
 pub mod full_gc;
 pub mod mark;
 pub mod taskqueue;
+//pub mod satb_mark_queue;
 pub mod memory_region;
 pub mod root_processor;
 pub mod virtual_memory;
@@ -312,4 +318,48 @@ impl GCHeuristic {
             _ => panic!("Unknown GC heuristic: {}", s)
         }
     } 
+}
+
+pub struct ConcurrentPhase {
+    name: &'static str,
+    start: Instant
+}
+
+pub struct PausePhase {
+    name: &'static str,
+    start: Instant
+}
+
+impl ConcurrentPhase {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now()
+        }
+    }
+}
+
+impl Drop for ConcurrentPhase {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+        let id = heap().controller_thread().get_gc_id();
+        log::info!(target: "gc", "GC({}) Concurrent {} {}ms", id, self.name, elapsed.as_micros() as f64 / 1000.0);
+    }
+}
+
+impl PausePhase {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            start: Instant::now()
+        }
+    }
+}
+
+impl Drop for PausePhase {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+        let id = heap().controller_thread().get_gc_id();
+        log::info!(target: "gc", "GC({}) Pause {} {}ms", id, self.name, elapsed.as_micros() as f64 / 1000.0);
+    }
 }

@@ -1,4 +1,3 @@
-use rsgc::heap::{thread, GCHeuristic};
 use rsgc::{
     env::read_uint_from_env,
     heap::{heap::Heap, region::HeapArguments, thread::ThreadInfo},
@@ -127,10 +126,49 @@ fn bench() {
     );
 }
 
+struct List {
+    next: Option<Handle<List>>,
+    val: usize
+}
+
+impl Object for List {
+    fn trace(&self, visitor: &mut dyn rsgc::traits::Visitor) {
+        match self.next {
+            Some(ref obj) => obj.trace(visitor),
+            _ => ()
+        }
+    }
+}
+
+impl Allocation for List {}
+
 fn main() {
     env_logger::init();
-    let mut args = HeapArguments::from_env();
-    args.learning_steps = 3;
+    let args = HeapArguments::from_env();
     let _ = Heap::new(args);
+    /* 
+    let thread = rsgc::heap::thread::thread();
+    let mut list =  thread.allocate_fixed(List {
+        next: None,
+        val: 0
+    });
+
+    for i in 0..16 * 1024 * 1024 * 100 {
+        if i % 10 * 1024 == 0 {
+            list = thread.allocate_fixed(List {
+                next: None,
+                val: i
+            });
+        } else {
+            let mut new = thread.allocate_fixed(List {
+                next: None,
+                val: i
+            });
+            new.as_mut().next = Some(list);
+            thread.write_barrier(new);
+            list = new;
+        }
+    }*/
+
     bench();
 }

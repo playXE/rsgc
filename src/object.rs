@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{any::{TypeId, Any}, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::{NonNull, null_mut}, sync::atomic::{AtomicU64, AtomicPtr}};
+use std::{any::{TypeId, Any}, marker::PhantomData, mem::{size_of, MaybeUninit}, ptr::{NonNull, null_mut}, sync::atomic::{AtomicU64, AtomicPtr}, ops::{Deref, DerefMut}};
 
 use crate::{bitfield::BitField, heap::{align_usize, free_list::Entry, thread::ThreadInfo, atomic_load, atomic_store}};
 
@@ -549,5 +549,18 @@ impl<T: Object + ?Sized> Object for AtomicHandle<T> {
         if let Some(handle) = self.load_acquire() {
             visitor.visit(handle.ptr.as_ptr());
         }
+    }
+}
+
+impl<T: Object + Sized> Deref for Handle<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<T: Object + Sized> DerefMut for Handle<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut()
     }
 }

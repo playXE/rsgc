@@ -1,8 +1,7 @@
-
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::distributions::{Distribution, Uniform};
 use rand::thread_rng;
-use std::sync::atomic::{Ordering, AtomicUsize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use crate::object::HeapObjectHeader;
 use crate::sync::suspendible_thread_set::SuspendibleThreadSetLeaver;
 use crate::traits::Visitor;
 
-use super::heap::{Heap, heap};
+use super::heap::{heap, Heap};
 use super::marking_context::MarkingContext;
 use super::root_processor::RootsCollector;
 use super::thread::ThreadInfo;
@@ -86,8 +85,8 @@ pub struct MarkingTask<'a> {
     stealers: &'a [Stealer<Address>],*/
     terminator: &'a Terminator,
     marked: usize,
-    heap: &'static Heap,
-    mark_ctx: &'static MarkingContext,
+    pub(crate) heap: &'static Heap,
+    pub(crate) mark_ctx: &'static MarkingContext,
 }
 
 impl<'a> MarkingTask<'a> {
@@ -107,7 +106,7 @@ impl<'a> MarkingTask<'a> {
         }
     }
 
-    fn pop(&mut self) -> Option<Address> {
+    pub fn pop(&mut self) -> Option<Address> {
         self.pop_local()
             .or_else(|| self.pop_worker())
             .or_else(|| self.pop_global())
@@ -141,7 +140,11 @@ impl<'a> MarkingTask<'a> {
 
     fn pop_global(&mut self) -> Option<Address> {
         loop {
-            let result = self.mark_ctx.mark_queues().injector().steal_batch_and_pop(self.worker());
+            let result = self
+                .mark_ctx
+                .mark_queues()
+                .injector()
+                .steal_batch_and_pop(self.worker());
 
             match result {
                 Steal::Empty => break,
@@ -221,19 +224,23 @@ impl<'a> MarkingTask<'a> {
         }
     }
 
-    unsafe fn try_mark(&mut self, obj: *mut u8) {
-        let obj = obj.cast::<HeapObjectHeader>().sub(1);
-        if self.mark_ctx.mark(obj) {
-            if self.local.has_capacity() {
-                self.local.push(obj as _);
-                self.defensive_push();
-            } else {
-                self.worker().push(obj as _);
-            }
+    pub fn push(&mut self, obj: *mut HeapObjectHeader) {
+        if self.local.has_capacity() {
+            self.local.push(obj as _);
+            self.defensive_push();
+        } else {
+            self.worker().push(obj as _);
         }
     }
 
-    unsafe fn try_mark_conservatively(&mut self, obj: *const u8) {
+    pub unsafe fn try_mark(&mut self, obj: *mut u8) {
+        let obj = obj.cast::<HeapObjectHeader>().sub(1);
+        if self.mark_ctx.mark(obj) {
+            self.push(obj);
+        }
+    }
+
+    pub unsafe fn try_mark_conservatively(&mut self, obj: *const u8) {
         if !self.heap.is_in(obj as _) {
             return;
         }
@@ -369,10 +376,9 @@ impl STWMark {
         let mut mark_stack = {
             let mut root_collector = RootsCollector::new(heap);
             root_collector.collect(threads);
-            root_collector.get_mark_stack()  
+            root_collector.get_mark_stack()
         };
 
-        
         let injector = heap.marking_context().mark_queues().injector();
         while let Some(obj) = mark_stack.pop() {
             injector.push(obj as usize);
@@ -392,7 +398,7 @@ impl STWMark {
                         task_id,
                         &terminator,
                         super::heap::heap(),
-                        super::heap::heap().marking_context()
+                        super::heap::heap().marking_context(),
                     );
 
                     task.run::<false>();
