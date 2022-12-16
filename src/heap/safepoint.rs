@@ -163,6 +163,11 @@ pub fn wait_gc() {
 }
 
 
+pub const SAFEPOINT_UNSYNCHRONIZED: u8 = 0;
+pub const SAFEPOINT_SYNCHRONIZING: u8 = 1;
+pub const SAFEPOINT_SYNCHRONIZED: u8 = 2;
+
+static SAFEPOINT_STATE: AtomicU8 = AtomicU8::new(0);
 
 pub struct SafepointSynchronize {}
 
@@ -172,9 +177,9 @@ impl SafepointSynchronize {
 
         let threads = threads();
         threads.get().lock.lock();
-
+        
         assert!(enter());
-
+        SAFEPOINT_STATE.store(SAFEPOINT_SYNCHRONIZING, Ordering::Release);
         for thread in threads.get().threads.iter().copied() {
             let th = &*thread;
             while th.atomic_gc_state().load(Ordering::Relaxed) == 0
@@ -184,6 +189,8 @@ impl SafepointSynchronize {
             }
         }
 
+        SAFEPOINT_STATE.store(SAFEPOINT_SYNCHRONIZED, Ordering::Release);
+
         &threads.get().threads
     }
 
@@ -191,6 +198,11 @@ impl SafepointSynchronize {
         heap().safepoint_synchronize_end();
         threads().get().lock.unlock();
         end();
+        SAFEPOINT_STATE.store(SAFEPOINT_UNSYNCHRONIZED, Ordering::Release);
+    }
+
+    pub fn is_at_safepoint() -> bool {
+        SAFEPOINT_STATE.load(Ordering::Acquire) == SAFEPOINT_SYNCHRONIZED
     }
 }
 

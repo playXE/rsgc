@@ -3,28 +3,29 @@ use std::{
     collections::HashMap,
     intrinsics::{likely, unlikely},
     mem::{size_of, MaybeUninit},
-    ptr::{null_mut, null},
-    sync::atomic::{AtomicI8, Ordering},
+    ptr::{null, null_mut},
+    sync::atomic::{AtomicI8, AtomicUsize, Ordering},
     thread::{JoinHandle, ThreadId},
 };
 
 use parking_lot::{Mutex, MutexGuard};
 
-use crate::heap::tlab::ThreadLocalAllocBuffer;
 use crate::{
     formatted_size,
     heap::stack::approximate_stack_pointer,
     object::{Allocation, ConstVal, Handle, HeapObjectHeader, SizeTag, VTable, VtableTag, VT},
-    traits::Object,
+    traits::Object, utils::deque::LocalSSB,
 };
+use crate::{heap::tlab::ThreadLocalAllocBuffer, utils::ptr_queue::PtrQueueImpl};
 
 use super::{
     align_usize,
     heap::{heap, Heap},
     marking_context::MarkingContext,
     safepoint,
+    shared_vars::SharedFlag,
     stack::StackBounds,
-    AllocRequest, shared_vars::SharedFlag,
+    AllocRequest,
 };
 
 // gc_state = 1 means the thread is doing GC or is waiting for the GC to
@@ -34,16 +35,13 @@ pub const GC_STATE_WAITING: i8 = 1;
 //              execute at the same time with the GC.
 pub const GC_STATE_SAFE: i8 = 2;
 
-
-/// GC Mutator. 
-/// 
+/// GC Mutator.
+///
 /// By using this structure you can allocate, synchronize with GC and insert write barriers.
 pub struct ThreadInfo {
     pub(crate) id: ThreadId,
     pub(crate) tlab: ThreadLocalAllocBuffer,
-    queue: Box<[*mut HeapObjectHeader]>,
-    queue_size: usize,
-    queue_index: usize,
+    satb_mark_queue: LocalSSB,
     cm_in_progress: *const SharedFlag,
     mark_ctx: *mut MarkingContext,
     stack: StackBounds,
@@ -53,10 +51,23 @@ pub struct ThreadInfo {
     gc_state: i8,
     safepoint_tasks: HashMap<usize, Box<dyn FnMut()>>,
     free_keys: Vec<usize>,
+    rcu_counter: AtomicUsize,
 }
 
 impl ThreadInfo {
-    /// Allocates fixed sized object on the heap. 
+    pub unsafe fn satb_mark_queue(&self) -> &LocalSSB {
+        &self.satb_mark_queue
+    }
+
+    pub unsafe fn satb_mark_queue_mut(&mut self) -> &mut LocalSSB {
+        &mut self.satb_mark_queue
+    }
+
+    pub unsafe fn get_rcu_counter(&self) -> &AtomicUsize {
+        &self.rcu_counter
+    }
+
+    /// Allocates fixed sized object on the heap.
     #[inline]
     pub fn allocate_fixed<T: 'static + Allocation>(&mut self, value: T) -> Handle<T> {
         unsafe {
@@ -70,18 +81,18 @@ impl ThreadInfo {
             (*obj).set_finalization_ordering(false);
 
             obj.add(1).cast::<T>().write(value);
-            // We implement black mutator technique and SATB for concurrent marking. 
-            // 
+            // We implement black mutator technique and SATB for concurrent marking.
+            //
             // This means we collect garbage that was allocated *before* the cycle started
             // and thus all new objects should implicitly be marked as black. This has problem
             // of floating garbage but it significantly simplifies write barrier implementation.
             (*self.mark_ctx).mark(obj as _);
-            
+
             Handle::from_raw(obj.add(1).cast())
         }
     }
 
-    /// Allocates variably sized object on the heap. 
+    /// Allocates variably sized object on the heap.
     pub fn allocate_varsize<T: 'static + Allocation>(
         &mut self,
         length: usize,
@@ -198,60 +209,57 @@ impl ThreadInfo {
             heap.options().max_tlab_size // TLAB size set automatically based on heap options
         };
 
-        self.queue = vec![null_mut(); heap.options().max_satb_buffer_size].into_boxed_slice();
+        /*self.queue = vec![null_mut(); heap.options().max_satb_buffer_size].into_boxed_slice();
         self.queue_index = 0;
-        self.queue_size = self.queue.len();
+        self.queue_size = self.queue.len();*/
         self.cm_in_progress = &heap.is_concurrent_mark_in_progress;
+        let buffer = unsafe { libc::malloc(size_of::<usize>() * heap.options().max_satb_buffer_size) };
+        self.satb_mark_queue.set_buffer(buffer.cast());
+        self.satb_mark_queue.set_index(heap.options().max_satb_buffer_size);
+        
     }
 
-    
-    /// SATB write barrier. Ensures that object processes all references correctly. 
+    /// SATB write barrier. Ensures that object processes all references correctly.
     /// Must be inserted after write to `handle`.
     #[inline]
     pub fn write_barrier<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
         unsafe {
             self.raw_write_barrier(handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast());
         }
-
     }
+
+    /// Yuasa deletion barrier implementation
     #[inline]
     pub unsafe fn raw_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
-        if !(*self.cm_in_progress).is_set() {
-            return;
-        }
-        
-        if !(*self.mark_ctx).is_marked(obj) {
-            *self.queue.get_unchecked_mut(self.queue_index) = obj;
-            self.queue_index += 1;
-            if self.queue_index == self.queue_size {
-                self.satb_flush();
+        if (*self.cm_in_progress).is_set() {
+            // Filter marked objects before hitting the SATB queues.
+            if !(*self.mark_ctx).is_marked(obj) {
+                if !self.satb_mark_queue.try_enqueue(obj as _) {
+                    self.slow_write_barrier(obj);
+                }
             }
         }
-
-
-    }  
+    }
     #[inline(never)]
     #[cold]
-    pub fn satb_flush(&mut self) -> bool {
-        if self.queue_index == 0 {
-            return false;
-        }
+    unsafe fn slow_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
+        self.flush_ssb();
+        self.raw_write_barrier(obj);
+    }
+    
+    pub(crate) unsafe fn flush_ssb(&mut self,) {
         let heap = heap();
+        for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
+            let obj = self.satb_mark_queue.buf.add(i).read();
+            assert!(!obj.is_null(), "null object at {}", i);
 
-        for i in 0..self.queue_index {
-            unsafe {
-                let obj = *self.queue.get_unchecked(i);
-                heap.marking_context().mark_queues().injector().push(obj as _);
+            // GC can do some progress in background and already mark object that was in SSB.
+            if !(*self.mark_ctx).is_marked(obj as _) { 
+                (*self.mark_ctx).mark_queues().injector().push(obj as _);
             }
         }
 
-        self.queue_index = 0;
-
-        true
-    }
-
-    pub fn satb_clear(&mut self) {
-        self.queue_index = 0;
+        self.satb_mark_queue.set_index(heap.options().max_satb_buffer_size);
     }
 
     pub fn atomic_gc_state(&self) -> &AtomicI8 {
@@ -295,16 +303,15 @@ impl ThreadInfo {
 
     /// Returns true if safepoints are conditional in this build of RSGC.
     pub const fn is_conditional_safepoint() -> bool {
-        cfg!(feature="conditional-safepoint")
+        cfg!(feature = "conditional-safepoint")
     }
-    
 
     /// Reads from polling page. If safepoint is disabled nothing happens
     /// but when safepoint is enabled this triggers page fault (SIGSEGV/SIGBUS on Linux/macOS/BSD)
     /// and goes into signal to suspend thread.
-    /// 
+    ///
     /// # Note
-    /// 
+    ///
     /// Enable `conditional-safepoint` feature when running in LLDB/GDB, otherwise safepoint events
     /// will be treatened as segfault by debuggers.
     #[inline(always)]
@@ -466,9 +473,8 @@ thread_local! {
             gc_state: 0,
             safepoint_tasks: HashMap::new(),
             free_keys: vec![],
-            queue: vec![].into_boxed_slice(),
-            queue_index: 0,
-            queue_size: 0,
+            satb_mark_queue: LocalSSB::new(),
+            rcu_counter: AtomicUsize::new(0),
             cm_in_progress: null()
         });
 }
@@ -551,6 +557,7 @@ where
                 true
             }
         });
+        (*current).flush_ssb();
         threads.get().lock.unlock();
         drop(scope);
 
@@ -594,7 +601,8 @@ impl ThreadLocalWriteBarrier {
     pub unsafe fn flush(&mut self) {
         for i in 0..self.index {
             let obj = *self.buffer.get_unchecked(i);
-            self.heap.marking_context()
+            self.heap
+                .marking_context()
                 .mark_queues()
                 .injector()
                 .push(obj as usize);

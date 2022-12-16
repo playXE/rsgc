@@ -7,4 +7,5 @@ pub mod worker_threads;
 pub mod single_writer;
 pub mod threads;
 pub mod lock_free_stack;
+pub mod global_counter;
 //pub mod vm_thread;

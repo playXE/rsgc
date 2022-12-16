@@ -1,3 +1,4 @@
+use std::ptr::null_mut;
 use std::sync::atomic::AtomicPtr;
 use std::sync::atomic::Ordering;
 pub trait LockFreeItem: Sized {
@@ -82,6 +83,33 @@ impl<T: LockFreeItem> LockFreeStack<T> {
             cur = Self::next(&*cur);
         }
         len
+    }
+
+    pub unsafe fn pop(&self) -> *mut T {
+        let mut result = self.top();
+        loop {
+            let mut new_top = null_mut();
+
+            if !result.is_null() {
+                new_top = Self::next(&*result);
+            }
+
+            match self.top.compare_exchange(result, new_top, Ordering::SeqCst, Ordering::Relaxed) {
+                Ok(v) => {
+                    result = v;
+                    break;
+                },
+                Err(v) => {
+                    result = v;
+                }
+            }
+        }
+
+        if !result.is_null() {
+            Self::set_next(&*result, null_mut());
+        }
+
+        result
     }
 
 }

@@ -31,16 +31,15 @@ impl SweepGarbageClosure {
             let header = begin as *mut HeapObjectHeader;
 
             let size = (*header).heap_size();
-            assert!(size != 0);
             if (*header).is_free() {
                 begin += size;
                 continue;
             }
 
             if !marking_context.is_marked(header) {
-                if unlikely((*header).vtable().light_finalizer) {
+                /*if unlikely((*header).vtable().light_finalizer) {
                     ((*header).vtable().finalize)(header.add(1).cast());
-                }
+                }*/
                 begin += size;
                 continue;
             }

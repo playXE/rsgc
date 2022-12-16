@@ -84,3 +84,15 @@ pub fn force_on_stack<T>(val: *const T) {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     }
 }
+
+
+#[macro_export]
+macro_rules! offsetof {
+    ($obj: ty, $($field: ident).+) => {
+        #[allow(unused_unsafe)]
+        unsafe {
+            let addr = 0x4000 as *const $obj;
+            &(*addr).$($field).* as *const _ as usize - 0x4000
+        }
+    };
+}
