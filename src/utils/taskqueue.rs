@@ -149,7 +149,7 @@ impl<const N: usize> TaskQueueSuper<N> {
 
     pub fn assert_empty(&self) {
         assert!(
-            self.bottom_relaxed() == self.age_top_relaxed() as _,
+            self.bottom_relaxed() == self.age_top_relaxed() as usize,
             "not empty"
         )
     }

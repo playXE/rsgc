@@ -80,67 +80,66 @@ impl<E: Copy, const N: usize> TaskQueue for BufferedOverflowTaskQueue<E, N> {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(target_pointer_width="64")] {
-
-/// MarkTask
-///
-/// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
-/// The design goal is to make the regular obj ops very fast, because that would be the prevailing
-/// case. On the other hand, it should not block parallel array processing from efficiently dividing
-/// the array work.
-///
-/// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
-/// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
-/// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
-/// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
-/// all possible arrays.
-///
-///    |xx-------obj---------|-pow-|--chunk---|
-///    0                    49     54        64
-///
-/// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
-///
-/// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
-/// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
-/// and "weak". This aligns with their frequent values: strong/counted-live references.
-///
-/// This encoding gives a few interesting benefits:
-///
-/// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
-///
-///    |---------obj---------|00000|0000000000| /// no chunk data
-///
-///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
-///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
-///
-/// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
-/// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
-///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
-///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
-///
-///    Observe that the union of these two intervals is:
-///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
-///
-///    ...which is the original interval:
-///      [ (C-1)*2^P; C*2^P )
-///
-/// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
-///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
-///
-/// Encoding limitations caused by current bitscales mean:
-///    10 bits for chunk: max 1024 blocks per array
-///     5 bits for power: max 2^32 array
-///    49 bits for   obj: max 512 TB of addressable space
-///
-/// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
-/// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
-/// In future, these might be rebalanced to favor one degree of freedom against another. For example,
-/// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
-/// some bits back if chunks are counted in ObjArrayMarkingStride units.
-///
-/// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
-/// bits from the native pointer. It is useful to debug the optimized version.
-///
+    if #[cfg(target_pointer_width="64")] {  
+        /// MarkTask
+        ///
+        /// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
+        /// The design goal is to make the regular obj ops very fast, because that would be the prevailing
+        /// case. On the other hand, it should not block parallel array processing from efficiently dividing
+        /// the array work.
+        ///
+        /// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
+        /// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
+        /// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
+        /// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
+        /// all possible arrays.
+        ///
+        ///    |xx-------obj---------|-pow-|--chunk---|
+        ///    0                    49     54        64
+        ///
+        /// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
+        ///
+        /// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
+        /// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
+        /// and "weak". This aligns with their frequent values: strong/counted-live references.
+        ///
+        /// This encoding gives a few interesting benefits:
+        ///
+        /// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
+        ///
+        ///    |---------obj---------|00000|0000000000| /// no chunk data
+        ///
+        ///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
+        ///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
+        ///
+        /// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
+        /// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
+        ///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
+        ///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
+        ///
+        ///    Observe that the union of these two intervals is:
+        ///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
+        ///
+        ///    ...which is the original interval:
+        ///      [ (C-1)*2^P; C*2^P )
+        ///
+        /// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
+        ///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
+        ///
+        /// Encoding limitations caused by current bitscales mean:
+        ///    10 bits for chunk: max 1024 blocks per array
+        ///     5 bits for power: max 2^32 array
+        ///    49 bits for   obj: max 512 TB of addressable space
+        ///
+        /// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
+        /// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
+        /// In future, these might be rebalanced to favor one degree of freedom against another. For example,
+        /// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
+        /// some bits back if chunks are counted in ObjArrayMarkingStride units.
+        ///
+        /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
+        /// bits from the native pointer. It is useful to debug the optimized version.
+        ///
         #[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Hash, Eq, Ord)]
         pub struct MarkTask {
             /// Everything is encoded into this field...
@@ -280,64 +279,64 @@ cfg_if::cfg_if! {
 
     } else {
         /// MarkTask
-///
-/// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
-/// The design goal is to make the regular obj ops very fast, because that would be the prevailing
-/// case. On the other hand, it should not block parallel array processing from efficiently dividing
-/// the array work.
-///
-/// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
-/// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
-/// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
-/// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
-/// all possible arrays.
-///
-///    |xx-------obj---------|-pow-|--chunk---|
-///    0                    49     54        64
-///
-/// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
-///
-/// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
-/// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
-/// and "weak". This aligns with their frequent values: strong/counted-live references.
-///
-/// This encoding gives a few interesting benefits:
-///
-/// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
-///
-///    |---------obj---------|00000|0000000000| /// no chunk data
-///
-///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
-///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
-///
-/// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
-/// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
-///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
-///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
-///
-///    Observe that the union of these two intervals is:
-///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
-///
-///    ...which is the original interval:
-///      [ (C-1)*2^P; C*2^P )
-///
-/// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
-///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
-///
-/// Encoding limitations caused by current bitscales mean:
-///    10 bits for chunk: max 1024 blocks per array
-///     5 bits for power: max 2^32 array
-///    49 bits for   obj: max 512 TB of addressable space
-///
-/// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
-/// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
-/// In future, these might be rebalanced to favor one degree of freedom against another. For example,
-/// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
-/// some bits back if chunks are counted in ObjArrayMarkingStride units.
-///
-/// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
-/// bits from the native pointer. It is useful to debug the optimized version.
-///
+        ///
+        /// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
+        /// The design goal is to make the regular obj ops very fast, because that would be the prevailing
+        /// case. On the other hand, it should not block parallel array processing from efficiently dividing
+        /// the array work.
+        ///
+        /// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
+        /// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
+        /// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
+        /// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
+        /// all possible arrays.
+        ///
+        ///    |xx-------obj---------|-pow-|--chunk---|
+        ///    0                    49     54        64
+        ///
+        /// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
+        ///
+        /// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
+        /// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
+        /// and "weak". This aligns with their frequent values: strong/counted-live references.
+        ///
+        /// This encoding gives a few interesting benefits:
+        ///
+        /// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
+        ///
+        ///    |---------obj---------|00000|0000000000| /// no chunk data
+        ///
+        ///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
+        ///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
+        ///
+        /// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
+        /// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
+        ///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
+        ///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
+        ///
+        ///    Observe that the union of these two intervals is:
+        ///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
+        ///
+        ///    ...which is the original interval:
+        ///      [ (C-1)*2^P; C*2^P )
+        ///
+        /// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
+        ///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
+        ///
+        /// Encoding limitations caused by current bitscales mean:
+        ///    10 bits for chunk: max 1024 blocks per array
+        ///     5 bits for power: max 2^32 array
+        ///    49 bits for   obj: max 512 TB of addressable space
+        ///
+        /// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
+        /// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
+        /// In future, these might be rebalanced to favor one degree of freedom against another. For example,
+        /// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
+        /// some bits back if chunks are counted in ObjArrayMarkingStride units.
+        ///
+        /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
+        /// bits from the native pointer. It is useful to debug the optimized version.
+        ///
         pub struct MarkTask {
 
         }

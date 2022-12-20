@@ -66,7 +66,7 @@ impl AllocationRate {
             ),
         };
         log::info!(target: "gc", "Sample interval: {} ms", this.interval.as_millis());
-        this 
+        this
     }
 
     pub fn sample(&mut self, allocated: usize) -> f64 {
@@ -75,13 +75,16 @@ impl AllocationRate {
         let mut rate = 0.0;
 
         if now - self.last_sample_time > self.interval {
-            rate = self.instanteneous_rate(allocated);
-            self.rate.add(rate);
-            self.rate_avg.add(self.rate.avg());
-        }
+            if allocated >= self.last_sample_value {
+                rate = self.instanteneous_rate_(now, allocated);
+               
+                self.rate.add(rate);
+                self.rate_avg.add(self.rate.avg());
+            }
 
-        self.last_sample_time = now;
-        self.last_sample_value = allocated;
+            self.last_sample_time = now;
+            self.last_sample_value = allocated;
+        }
 
         rate
     }
@@ -100,7 +103,7 @@ impl AllocationRate {
         };
 
         let time_delta = time - last_time;
-
+        //println!("time delta: {}ms {}", time_delta.as_micros() as f64 / 1000.0, formatted_size(allocation_delta));
         if time_delta.as_micros() as f64 / 1000.0 / 1000.0 > 0.0 {
             allocation_delta as f64 / (time_delta.as_micros() as f64 / 1000.0 / 1000.0)
         } else {
@@ -284,14 +287,14 @@ impl Heuristics for AdaptiveHeuristics {
 
     fn should_start_gc(&mut self) -> bool {
         let heap = heap();
-        
+
         let max_capacity = heap.max_capacity();
         let available = heap.free_set().available();
         let allocated = heap.bytes_allocated_since_gc_start();
 
         let rate = self.allocation_rate.sample(allocated);
         self.last_trigger = Trigger::Other;
-        let avg_alloc_rate = self.allocation_rate.upper_bound(self.margin_of_error_sd);
+
         let min_threshold = max_capacity / 100 * heap.options().min_free_threshold;
 
         if available < min_threshold {
@@ -323,16 +326,17 @@ impl Heuristics for AdaptiveHeuristics {
         //   1. Some space to absorb allocation spikes
         //   2. Accumulated penalties from Degenerated and Full GC
         let mut allocation_headroom = available;
-
+        let avg_alloc_rate = self.allocation_rate.upper_bound(self.margin_of_error_sd);
         let spike_headroom = max_capacity / 100 * heap.options().alloc_spike_factor;
         let penalties = max_capacity / 100 * self.gc_time_penalties as usize;
 
         allocation_headroom -= allocation_headroom.min(spike_headroom);
         allocation_headroom -= allocation_headroom.min(penalties);
 
-        let avg_cycle_time = self.gc_time_history.davg() + (self.margin_of_error_sd * self.gc_time_history.dsd());
-        
-        
+        let avg_cycle_time =
+            self.gc_time_history.davg() + (self.margin_of_error_sd * self.gc_time_history.dsd());
+        //log::info!("avg_cycle_time: {}, allocation rate: {}, {}", avg_cycle_time, formatted_sizef(avg_alloc_rate), allocation_headroom as f64 / avg_alloc_rate);
+
         if avg_cycle_time > allocation_headroom as f64 / avg_alloc_rate {
             log::info!(
                 target: "gc",
@@ -356,7 +360,9 @@ impl Heuristics for AdaptiveHeuristics {
             return true;
         }
         //println!("rate: {}", rate);
-        let is_spiking = self.allocation_rate.is_spiking(rate, self.spike_threshold_sd);
+        let is_spiking = self
+            .allocation_rate
+            .is_spiking(rate, self.spike_threshold_sd);
 
         if is_spiking && avg_cycle_time > allocation_headroom as f64 / rate {
             log::info!(
@@ -371,7 +377,6 @@ impl Heuristics for AdaptiveHeuristics {
             self.last_trigger = Trigger::Spike;
             return true;
         }
-        
 
         if heap.options().guaranteed_gc_interval > 0 {
             let last_time_ms = (Instant::now() - self.last_cycle_end()).as_millis();
@@ -388,7 +393,7 @@ impl Heuristics for AdaptiveHeuristics {
     fn record_success_concurrent(&mut self) {
         self.set_degenerate_cycles_in_a_row(0);
         self.set_successful_cycles_in_a_row(self.successful_cycles_in_a_row() + 1);
-        
+
         let t = self.time_since_last_gc().as_micros() as f64 / 1000.0 / 1000.0;
         self.gc_time_history_mut().add(t);
         self.set_gc_times_learned(self.gc_times_learned() + 1);

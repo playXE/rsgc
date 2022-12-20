@@ -2,17 +2,21 @@ use std::time::Instant;
 
 use atomic::{Atomic, Ordering};
 
+use crate::utils::sloppy_memset;
+
 use self::heap::heap;
 
 pub mod heap;
 pub mod thread;
 pub mod safepoint;
+pub mod pacer;
 pub mod bitmap;
 pub mod concurrent_thread;
 pub mod controller;
 pub mod degenerated_gc;
 pub mod free_list;
 pub mod free_set;
+pub mod card_table;
 pub mod region;
 pub mod obj_storage;
 pub mod write_barrier;
@@ -217,7 +221,9 @@ impl DynBitmap {
     }
 
     pub fn clear(&mut self) {
-        self.buffer.fill(0);
+        unsafe {
+            sloppy_memset::sloppy_memset(self.buffer.as_mut_ptr(), 0, self.buffer.len());
+        }
     }
 
     pub fn count_ones(&self) -> usize {
@@ -256,6 +262,7 @@ impl std::iter::FromIterator<bool> for DynBitmap {
 
 
 
+#[inline(always)]
 pub fn atomic_load<T>(ptr: *const T, ordering: Ordering) -> T
 where
     T: Copy,
@@ -266,7 +273,7 @@ where
         atomic.load(ordering)
     }
 }
-
+#[inline(always)]
 pub fn atomic_store<T>(ptr: *const T, value: T, ordering: Ordering)
 where
     T: Copy,
@@ -276,7 +283,7 @@ where
         atomic.store(value, ordering);
     }
 }
-
+#[inline(always)]
 pub fn atomic_cmpxchg<T>(data: &T, old: T, new: T) -> T 
 where T: Copy 
 {

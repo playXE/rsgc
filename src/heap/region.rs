@@ -1,11 +1,14 @@
 use core::fmt;
+use std::intrinsics::unlikely;
 use std::{mem::size_of, ptr::null_mut, time::Instant};
 
 use crate::env::{get_total_memory, read_float_from_env};
 use crate::heap::heap::heap;
+use crate::object::HeapObjectHeader;
 use crate::{env::read_uint_from_env, formatted_size};
 
-use super::virtual_memory::VirtualMemory;
+use super::marking_context::MarkingContext;
+use super::virtual_memory::{PlatformVirtualMemory, VirtualMemory, VirtualMemoryImpl};
 use super::GCHeuristic;
 use super::{align_down, bitmap::HeapBitmap, free_list::FreeList, virtual_memory};
 
@@ -41,6 +44,7 @@ pub struct HeapRegion {
     typ: RegionState,
     index: usize,
     used: usize,
+    pub visited: bool,
     pub(crate) object_start_bitmap: HeapBitmap<16>,
     /// Start of region memory
     begin: *mut u8,
@@ -55,19 +59,19 @@ pub struct HeapRegion {
 
 #[derive(Debug)]
 pub struct HeapArguments {
-    /// With automatic region sizing, the regions would be at most 
+    /// With automatic region sizing, the regions would be at most
     /// this large.
     pub max_region_size: usize,
     /// With automatic region sizing, the regions would be at least
     /// this large.
     pub min_region_size: usize,
-    /// With automatic region sizing, this is the approximate number 
+    /// With automatic region sizing, this is the approximate number
     /// of regions that would be used, within min/max region size
     /// limits."
     pub target_num_regions: usize,
     /// Humongous objects are allocated in separate regions.
     /// This setting defines how large the object should be to be
-    /// deemed humongous. Value is in  percents of heap region size. 
+    /// deemed humongous. Value is in  percents of heap region size.
     /// This also caps the maximum TLAB size.
     pub humongous_threshold: usize,
     /// Static heap region size. Set zero to enable automatic sizing.
@@ -123,6 +127,25 @@ pub struct HeapArguments {
     /// - compact - run GC more frequently and with deeper targets to free up more memory.
     pub heuristics: GCHeuristic,
     pub init_free_threshold: usize,
+    /// Pace application allocations to give GC chance to start
+    /// and complete before allocation failure is reached.
+    pub pacing: bool,
+    /// Max delay for pacing application allocations. Larger values
+    /// provide more resilience against out of memory, at expense at
+    /// hiding the GC latencies in the allocation path. Time is in
+    /// milliseconds. Setting it to arbitrarily large value makes
+    /// GC effectively stall the threads indefinitely instead of going
+    /// to degenerated or Full GC.
+    pub pacing_max_delay: usize,
+    /// How much of free space to take as non-taxable allocations the GC cycle.
+    /// Larger value makes the pacing milder at the beginning of the cycle.
+    /// Lower value makes the pacing less uniform during the cyclent. In percent of free space
+    pub pacing_cycle_slack: usize,
+    pub pacing_idle_slack: usize,
+    /// Additional pacing tax surcharge to help unclutter the heap.
+    /// Larger values makes the pacing more aggressive. Lower values
+    /// risk GC cycles finish with less memory than were available at the beginning of it.
+    pub pacing_surcharge: f64,
 }
 
 impl HeapArguments {
@@ -415,6 +438,11 @@ impl Default for HeapArguments {
             immediate_threshold: 90,
             heuristics: GCHeuristic::Adaptive,
             init_free_threshold: 70,
+            pacing: true,
+            pacing_cycle_slack: 10,
+            pacing_idle_slack: 2,
+            pacing_max_delay: 10,
+            pacing_surcharge: 1.1,
         }
     }
 }
@@ -465,6 +493,25 @@ pub struct HeapOptions {
     pub adaptive_initial_spike_threshold: f64,
     pub alloc_spike_factor: usize,
     pub init_free_threshold: usize,
+    /// Pace application allocations to give GC chance to start
+    /// and complete before allocation failure is reached.
+    pub pacing: bool,
+    /// Max delay for pacing application allocations. Larger values
+    /// provide more resilience against out of memory, at expense at
+    /// hiding the GC latencies in the allocation path. Time is in
+    /// milliseconds. Setting it to arbitrarily large value makes
+    /// GC effectively stall the threads indefinitely instead of going
+    /// to degenerated or Full GC.
+    pub pacing_max_delay: usize,
+    /// How much of free space to take as non-taxable allocations the GC cycle.
+    /// Larger value makes the pacing milder at the beginning of the cycle.
+    /// Lower value makes the pacing less uniform during the cyclent. In percent of free space
+    pub pacing_cycle_slack: usize,
+    pub pacing_idle_slack: usize,
+    /// Additional pacing tax surcharge to help unclutter the heap.
+    /// Larger values makes the pacing more aggressive. Lower values
+    /// risk GC cycles finish with less memory than were available at the beginning of it.
+    pub pacing_surcharge: f64,
 }
 
 impl HeapOptions {
@@ -508,6 +555,7 @@ impl HeapRegion {
     ) -> *mut Self {
         let p = loc as *mut Self;
         p.write(Self {
+            visited: false,
             last_sweep_free: 0,
             typ: if is_commited {
                 RegionState::EmptyCommited
@@ -556,18 +604,15 @@ impl HeapRegion {
     }
 
     pub fn do_commit(&mut self) {
-        unsafe {
-            VirtualMemory::commit(self.bottom() as _, self.size());
-        }
+        PlatformVirtualMemory::commit(self.bottom() as _, self.size());
         heap().increase_commited(self.size());
         self.typ = RegionState::EmptyCommited;
     }
 
     pub fn do_decommit(&mut self) {
-        unsafe {
-            VirtualMemory::decommit(self.bottom() as _, self.size());
-            VirtualMemory::dont_need(self.bottom() as _, self.size());
-        }
+        PlatformVirtualMemory::decommit(self.bottom() as _, self.size());
+        PlatformVirtualMemory::dontneed(self.bottom() as _, self.size());
+
         heap().decrease_commited(self.size());
         self.free_list.clear();
         self.typ = RegionState::EmptyUncommited;
@@ -740,7 +785,12 @@ impl HeapRegion {
         opts.adaptive_initial_spike_threshold = args.adaptive_initial_spike_threshold;
         opts.alloc_spike_factor = args.alloc_spike_factor;
         opts.init_free_threshold = args.init_free_threshold;
-        
+        opts.pacing = args.pacing;
+        opts.pacing_cycle_slack = args.pacing_cycle_slack;
+        opts.pacing_idle_slack = args.pacing_idle_slack;
+        opts.pacing_max_delay = args.pacing_max_delay;
+        opts.pacing_surcharge = args.pacing_surcharge;
+
         let min_region_size = if args.min_region_size < Self::MIN_REGION_SIZE {
             Self::MIN_REGION_SIZE
         } else {

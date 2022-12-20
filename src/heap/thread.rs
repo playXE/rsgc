@@ -5,27 +5,32 @@ use std::{
     mem::{size_of, MaybeUninit},
     ptr::{null, null_mut},
     sync::atomic::{AtomicI8, AtomicUsize, Ordering},
-    thread::{JoinHandle, ThreadId},
+    thread::{JoinHandle, ThreadId}, panic::UnwindSafe, any::Any,
 };
-
-use parking_lot::{Mutex, MutexGuard};
 
 use crate::{
     formatted_size,
-    heap::stack::approximate_stack_pointer,
+    heap::{mark::MarkTask, stack::approximate_stack_pointer},
     object::{Allocation, ConstVal, Handle, HeapObjectHeader, SizeTag, VTable, VtableTag, VT},
-    traits::Object, utils::deque::LocalSSB,
+    sync::{
+        self,
+        mutex::{Condvar, Mutex, MutexGuard},
+    },
+    traits::Object,
+    utils::deque::LocalSSB,
 };
 use crate::{heap::tlab::ThreadLocalAllocBuffer, utils::ptr_queue::PtrQueueImpl};
 
 use super::{
     align_usize,
+    bitmap::HeapBitmap,
+    card_table::CardTable,
     heap::{heap, Heap},
     marking_context::MarkingContext,
     safepoint,
     shared_vars::SharedFlag,
     stack::StackBounds,
-    AllocRequest,
+    AllocRequest, region::HeapArguments,
 };
 
 // gc_state = 1 means the thread is doing GC or is waiting for the GC to
@@ -38,33 +43,29 @@ pub const GC_STATE_SAFE: i8 = 2;
 /// GC Mutator.
 ///
 /// By using this structure you can allocate, synchronize with GC and insert write barriers.
-pub struct ThreadInfo {
+pub struct Thread {
     pub(crate) id: ThreadId,
     pub(crate) tlab: ThreadLocalAllocBuffer,
+    pub(crate) biased_begin: usize,
     satb_mark_queue: LocalSSB,
-    cm_in_progress: *const SharedFlag,
+    cm_in_progress: bool,
     mark_ctx: *mut MarkingContext,
+    mark_bitmap: *const HeapBitmap<16>,
     stack: StackBounds,
     max_tlab_size: usize,
     safepoint: *mut u8,
     last_sp: *mut u8,
     gc_state: i8,
-    safepoint_tasks: HashMap<usize, Box<dyn FnMut()>>,
-    free_keys: Vec<usize>,
-    rcu_counter: AtomicUsize,
+
 }
 
-impl ThreadInfo {
+impl Thread {
     pub unsafe fn satb_mark_queue(&self) -> &LocalSSB {
         &self.satb_mark_queue
     }
 
     pub unsafe fn satb_mark_queue_mut(&mut self) -> &mut LocalSSB {
         &mut self.satb_mark_queue
-    }
-
-    pub unsafe fn get_rcu_counter(&self) -> &AtomicUsize {
-        &self.rcu_counter
     }
 
     /// Allocates fixed sized object on the heap.
@@ -77,17 +78,18 @@ impl ThreadInfo {
             (*obj).word = 0;
             (*obj).set_vtable(VT::<T>::VAL as *const VTable as _);
             (*obj).set_heap_size(size);
-            (*obj).clear_marked();
-            (*obj).set_finalization_ordering(false);
-
+            //(*obj).clear_marked();
+            //(*obj).set_finalization_ordering(false);
+            if T::NO_HEAP_PTRS {
+                (*obj).set_no_heap_ptrs();
+            }
             obj.add(1).cast::<T>().write(value);
             // We implement black mutator technique and SATB for concurrent marking.
             //
             // This means we collect garbage that was allocated *before* the cycle started
             // and thus all new objects should implicitly be marked as black. This has problem
             // of floating garbage but it significantly simplifies write barrier implementation.
-            (*self.mark_ctx).mark(obj as _);
-
+            (*self.mark_bitmap).atomic_test_and_set(obj as _);
             Handle::from_raw(obj.add(1).cast())
         }
     }
@@ -102,6 +104,7 @@ impl ThreadInfo {
                 T::SIZE + size_of::<HeapObjectHeader>() + T::VARSIZE_ITEM_SIZE * length,
                 16,
             );
+
             let mem = self.allocate_raw(size);
             let obj = mem as *mut HeapObjectHeader;
             (*obj).word = 0;
@@ -109,13 +112,17 @@ impl ThreadInfo {
             (*obj).set_heap_size(size);
             (*obj).clear_marked();
             (*obj).set_finalization_ordering(false);
-
+            if T::NO_HEAP_PTRS {
+                (*obj).set_no_heap_ptrs();
+            }
             obj.add(1)
                 .cast::<u8>()
                 .add(T::VARSIZE_OFFSETOF_LENGTH)
                 .cast::<usize>()
                 .write(length);
-            (*self.mark_ctx).mark(obj as _);
+
+            //debug_assert!((*self.mark_ctx).is_marked(obj as _));
+            (*self.mark_bitmap).atomic_test_and_set(obj as _);
             Handle::from_raw(obj.add(1).cast())
         }
     }
@@ -133,6 +140,7 @@ impl ThreadInfo {
     #[cold]
     #[inline(never)]
     unsafe fn allocate_slow(&mut self, size: usize) -> *mut u8 {
+        assert!(self.is_registered(), "trying to perform allocation in unregistered thread with id: {:?}", self.id);
         if size > self.max_tlab_size {
             self.allocate_outside_tlab(size)
         } else {
@@ -153,6 +161,7 @@ impl ThreadInfo {
         if mem.is_null() {
             std::panic::panic_any(OOM(size));
         }
+        heap().mark_live(mem);
 
         mem
     }
@@ -166,7 +175,7 @@ impl ThreadInfo {
         self.tlab.retire(self.id);
 
         let tlab_size = self.max_tlab_size;
-        let mut req = AllocRequest::new(super::AllocType::ForLAB, tlab_size, tlab_size);
+        let mut req = AllocRequest::new(super::AllocType::ForLAB, 2 * 1024, tlab_size);
         let mem = heap().allocate_memory(&mut req);
 
         if mem.is_null() {
@@ -185,17 +194,13 @@ impl ThreadInfo {
 
     #[cold]
     pub(crate) fn register(&mut self) {
-        self.safepoint = safepoint::SAFEPOINT_PAGE.load(Ordering::Relaxed);
+        self.safepoint = safepoint::SAFEPOINT_PAGE.address();
         assert_ne!(self.safepoint, null_mut());
         self.stack = StackBounds::current_thread_stack_bounds();
         self.last_sp = approximate_stack_pointer() as _;
         self.mark_ctx = heap().marking_context_mut() as *mut MarkingContext;
         let th = threads();
-        th.get().lock.lock();
-        th.get_mut().threads.push(self as *mut ThreadInfo);
-        unsafe {
-            th.get().lock.unlock();
-        }
+        th.add_thread(Thread::current());
 
         for _ in 0..3 {
             self.safepoint();
@@ -212,11 +217,14 @@ impl ThreadInfo {
         /*self.queue = vec![null_mut(); heap.options().max_satb_buffer_size].into_boxed_slice();
         self.queue_index = 0;
         self.queue_size = self.queue.len();*/
-        self.cm_in_progress = &heap.is_concurrent_mark_in_progress;
-        let buffer = unsafe { libc::malloc(size_of::<usize>() * heap.options().max_satb_buffer_size) };
+        let buffer =
+            unsafe { libc::malloc(size_of::<usize>() * heap.options().max_satb_buffer_size) };
         self.satb_mark_queue.set_buffer(buffer.cast());
-        self.satb_mark_queue.set_index(heap.options().max_satb_buffer_size);
-        
+        self.satb_mark_queue
+            .set_index(heap.options().max_satb_buffer_size);
+        self.biased_begin = heap.card_table().get_biased_begin();
+        self.mark_bitmap = heap.marking_context().mark_bitmap();
+        self.cm_in_progress = heap.is_concurrent_mark_in_progress(); // Thread migth be attached while marking is running.
     }
 
     /// SATB write barrier. Ensures that object processes all references correctly.
@@ -228,12 +236,16 @@ impl ThreadInfo {
         }
     }
 
+    pub(crate) fn toggle_write_barrier(&mut self, value: bool) {
+        self.cm_in_progress = value;
+    }
+
     /// Yuasa deletion barrier implementation
     #[inline]
     pub unsafe fn raw_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
-        if (*self.cm_in_progress).is_set() {
+        if self.cm_in_progress {
             // Filter marked objects before hitting the SATB queues.
-            if !(*self.mark_ctx).is_marked(obj) {
+            if !(*self.mark_bitmap).check_bit(obj as _) {
                 if !self.satb_mark_queue.try_enqueue(obj as _) {
                     self.slow_write_barrier(obj);
                 }
@@ -246,20 +258,22 @@ impl ThreadInfo {
         self.flush_ssb();
         self.raw_write_barrier(obj);
     }
-    
-    pub(crate) unsafe fn flush_ssb(&mut self,) {
+
+    pub(crate) unsafe fn flush_ssb(&mut self) {
         let heap = heap();
         for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
             let obj = self.satb_mark_queue.buf.add(i).read();
-            assert!(!obj.is_null(), "null object at {}", i);
-
             // GC can do some progress in background and already mark object that was in SSB.
-            if !(*self.mark_ctx).is_marked(obj as _) { 
-                (*self.mark_ctx).mark_queues().injector().push(obj as _);
+            if !(*self.mark_ctx).is_marked(obj as _) {
+                (*self.mark_ctx)
+                    .mark_queues()
+                    .injector()
+                    .push(MarkTask::new(obj as _, false, false));
             }
         }
 
-        self.satb_mark_queue.set_index(heap.options().max_satb_buffer_size);
+        self.satb_mark_queue
+            .set_index(heap.options().max_satb_buffer_size);
     }
 
     pub fn atomic_gc_state(&self) -> &AtomicI8 {
@@ -351,12 +365,6 @@ impl ThreadInfo {
         self.last_sp = sp;
 
         self.set_gc_and_wait();
-
-        let mut tasks = std::mem::replace(&mut self.safepoint_tasks, HashMap::new());
-        for (_, task) in tasks.iter_mut() {
-            task();
-        }
-        self.safepoint_tasks = tasks;
     }
 
     pub(crate) fn set_gc_and_wait(&mut self) {
@@ -367,51 +375,21 @@ impl ThreadInfo {
         self.atomic_gc_state().store(state, Ordering::Release);
     }
 
-    /// Adds tasks that will get executed when thread reaches safepoint.
-    ///
-    /// # Safety
-    ///
-    /// `task` should use signal-safe APIs and ideally not access heap APIs.
-    pub unsafe fn add_safepoint_task<F: 'static + FnMut()>(&mut self, task: F) -> usize {
-        let key = self.free_keys.pop().unwrap_or(self.safepoint_tasks.len());
-
-        self.safepoint_tasks.insert(key, Box::new(task));
-        key
-    }
-
     /// Returns true if thread is registered in a GC.
     pub fn is_registered(&self) -> bool {
         !self.safepoint.is_null() && unsafe { self.safepoint != &mut SINK }
     }
-}
 
-/// Get [ThreadInfo] reference for allocating memory and accessing GC APIs.
-///
-/// If thread is not registered by a GC it is first registered and then reference is returned.
-pub fn thread() -> &'static mut ThreadInfo {
-    unsafe {
-        let thread = THREAD.with(|th| th.get());
-        if unlikely(!(*thread).is_registered()) {
-            (*thread).register();
-        }
-        &mut *thread
+    pub fn current() -> &'static mut Thread {
+        THREAD.with(|thread| unsafe {
+            &mut *thread.get()
+        })
     }
-}
-
-/// Acquire [ThreadInfo] reference without registering in a GC.
-/// At the moment used only for implementing sync primitives as we do not
-/// need to register thread just because it is using our mutex or monitor implementation.
-///
-/// # Safety
-///
-/// User must not allocate into thread if it is not registered.
-pub unsafe fn thread_no_register() -> &'static mut ThreadInfo {
-    THREAD.with(|th| &mut *th.get())
 }
 
 pub struct UnsafeScope {
     state: i8,
-    thread: &'static mut ThreadInfo,
+    thread: &'static mut Thread,
 }
 
 impl UnsafeScope {
@@ -419,7 +397,7 @@ impl UnsafeScope {
     /// at GC cycle.
     ///
     /// Returns current state to restore later.
-    pub fn new(thread: &'static mut ThreadInfo) -> Self {
+    pub fn new(thread: &'static mut Thread) -> Self {
         Self {
             state: thread.state_save_and_set(0),
             thread,
@@ -435,7 +413,7 @@ impl Drop for UnsafeScope {
 
 pub struct SafeScope<'a> {
     state: i8,
-    thread: &'a mut ThreadInfo,
+    thread: &'a mut Thread,
 }
 
 impl<'a> SafeScope<'a> {
@@ -443,7 +421,7 @@ impl<'a> SafeScope<'a> {
     /// at GC cycle.
     ///
     /// Returns current state to restore later.
-    pub fn new(thread: &'a mut ThreadInfo) -> Self {
+    pub fn new(thread: &'a mut Thread) -> Self {
         thread.set_last_sp(approximate_stack_pointer() as _);
         Self {
             state: thread.state_save_and_set(GC_STATE_SAFE),
@@ -461,66 +439,79 @@ impl<'a> Drop for SafeScope<'a> {
 static mut SINK: u8 = 0;
 
 thread_local! {
-    static THREAD: UnsafeCell<ThreadInfo> = UnsafeCell::new(
-        ThreadInfo {
+    static THREAD: UnsafeCell<Thread> = UnsafeCell::new(
+        Thread {
+            biased_begin: 0,
             id: std::thread::current().id(),
             mark_ctx: null_mut(),
+            mark_bitmap: null_mut(),
             tlab: ThreadLocalAllocBuffer::new(),
             stack: StackBounds::current_thread_stack_bounds(),
             safepoint: unsafe { &mut SINK },
             last_sp: null_mut(),
             max_tlab_size: 0,
             gc_state: 0,
-            safepoint_tasks: HashMap::new(),
-            free_keys: vec![],
             satb_mark_queue: LocalSSB::new(),
-            rcu_counter: AtomicUsize::new(0),
-            cm_in_progress: null()
+            cm_in_progress: false
         });
 }
 
-/*
-impl Drop for ThreadInfo {
-    fn drop(&mut self) {
-        let current = self as *mut Self;
-        let safe = SafeScope::new(self);
-
-        acquire_threads().retain(|thread| {
-            let thread = *thread;
-
-            thread != current
-        });
-        drop(safe);
-    }
-}*/
-
-use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
-
-pub(crate) struct ThreadsInner {
-    pub(crate) threads: Vec<*mut ThreadInfo>,
-    pub(crate) lock: Lock,
-}
+use parking_lot::lock_api::RawMutex;
+use sync::mutex::RawMutex as Lock;
 
 pub struct Threads {
-    inner: UnsafeCell<ThreadsInner>,
+    pub threads: Mutex<Vec<*mut Thread>>,
+    pub cv_join: Condvar,
 }
 
 impl Threads {
     pub fn new() -> Self {
         Self {
-            inner: UnsafeCell::new(ThreadsInner {
-                threads: vec![],
-                lock: Lock::INIT,
-            }),
+            threads: Mutex::new(vec![]),
+            cv_join: Condvar::new()
         }
     }
 
-    pub(crate) fn get(&self) -> &ThreadsInner {
-        unsafe { &*self.inner.get() }
+    pub fn add_thread(&self, thread: *mut Thread) {
+        let mut threads = self.threads.lock(false);
+        threads.push(thread);
     }
 
-    pub(crate) fn get_mut(&self) -> &mut ThreadsInner {
-        unsafe { &mut *self.inner.get() }
+    pub fn remove_current_thread(&self) {
+        unsafe {
+            let thread = Thread::current();
+            (*thread).tlab.retire(std::thread::current().id());
+            (*thread).flush_ssb();
+            let raw = thread as *mut Thread;
+            let safe_scope = SafeScope::new(thread);
+            
+            let mut threads = self.threads.lock(true);
+            threads.retain(|th| {
+                let th = *th;
+                if th == raw {
+                    false
+                } else {
+                    true
+                }
+            });
+
+            drop(safe_scope);
+            thread.safepoint = &mut SINK;
+            self.cv_join.notify_all();
+        }
+    }
+
+    pub fn join_all(&self) {
+        let mut threads = self.threads.lock(true);
+
+        while threads.len() > 0 {
+            self.cv_join.wait(&mut threads);
+        }
+    }
+
+    pub fn get(&self) -> MutexGuard<'_, Vec<*mut Thread>> {
+        let threads = self.threads.lock(false);
+        threads
     }
 }
 
@@ -535,78 +526,59 @@ pub(crate) fn threads() -> &'static Threads {
 
 pub struct OOM(pub usize);
 
-pub fn spawn<R>(f: impl FnOnce() -> R + Send + 'static) -> JoinHandle<R>
-where
-    R: Send + 'static,
+pub fn main_thread(args: HeapArguments, callback: impl FnOnce(&mut Heap) + UnwindSafe) {
+    let heap = Heap::new(args);
+    Thread::current().register();
+    let res = std::panic::catch_unwind(|| callback(super::heap::heap()));
+
+    let scope = SafeScope::new(Thread::current());
+    threads().remove_current_thread();
+    threads().join_all();
+    drop(scope);
+
+    unsafe {
+        heap.stop();
+    }
+
+    match res {
+        Ok(_) => (),
+        Err(err) => std::panic::resume_unwind(err)
+    }
+}
+
+pub fn spawn_thread<F,R>(cb: F) -> GCAwareJoinHandle<R> 
+where F: 'static + FnOnce() -> R + Send + UnwindSafe,
+      R: 'static + Send
 {
-    std::thread::spawn(move || unsafe {
-        let thread = thread();
+    let thread = Thread::current();
+    let scope = SafeScope::new(thread);
+    let join = std::thread::spawn(move || {
+        Thread::current().register();
+        let res = std::panic::catch_unwind(|| cb());
+        
+        threads().remove_current_thread();
 
-        let res = f();
-        thread.tlab.retire(thread.id);
-        let current = thread as *mut ThreadInfo;
-        let scope = SafeScope::new(thread);
-        let threads = threads();
-        threads.get().lock.lock();
+        match res {
+            Ok(val) => val,
+            Err(err) => std::panic::resume_unwind(err)
+        }
+    });
+    drop(scope);
+    GCAwareJoinHandle {
+        join
+    }
+}
 
-        threads.get_mut().threads.retain(|thread| {
-            let th = *thread;
-            if th == current {
-                false
-            } else {
-                true
-            }
-        });
-        (*current).flush_ssb();
-        threads.get().lock.unlock();
+pub struct GCAwareJoinHandle<R> {
+    join: JoinHandle<R>
+}
+
+impl<R> GCAwareJoinHandle<R> {
+    pub fn join(self) -> Result<R, Box<dyn Any + Send>> {
+        let scope = SafeScope::new(Thread::current());
+        let res = self.join.join();
         drop(scope);
 
         res
-    })
-}
-
-pub struct ThreadLocalWriteBarrier {
-    buffer: Box<[*mut HeapObjectHeader]>,
-    size: usize,
-    index: usize,
-    enabled: bool,
-    heap: &'static Heap,
-}
-
-impl ThreadLocalWriteBarrier {
-    pub fn new(buffer_size: usize) -> Self {
-        Self {
-            buffer: vec![null_mut(); buffer_size].into_boxed_slice(),
-            size: buffer_size,
-            index: 0,
-            enabled: false,
-            heap: heap(),
-        }
-    }
-
-    #[inline(never)]
-    pub unsafe fn write(&mut self, obj: *mut HeapObjectHeader) {
-        if self.enabled && !self.heap.marking_context().is_marked(obj) {
-            *self.buffer.get_unchecked_mut(self.index) = obj;
-            self.index += 1;
-
-            if self.index == self.size {
-                self.flush();
-            }
-        }
-    }
-
-    #[cold]
-    #[inline(never)]
-    pub unsafe fn flush(&mut self) {
-        for i in 0..self.index {
-            let obj = *self.buffer.get_unchecked(i);
-            self.heap
-                .marking_context()
-                .mark_queues()
-                .injector()
-                .push(obj as usize);
-        }
-        self.index = 0;
     }
 }

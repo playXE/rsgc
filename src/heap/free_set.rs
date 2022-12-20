@@ -193,10 +193,7 @@ impl RegionFreeSet {
 
             if size >= req.min_size() {
                 result = (*region).allocate(size); // allocate from free-list
-                if result.is_null() {
-                    // region is fragmented and does not actually have hole large enough
-                    return null_mut();
-                }
+                assert!(!result.is_null(), "Allocation must succeed: free {}, actual {}", formatted_size(free), formatted_size(size));
             } else {
                 result = null_mut();
             }

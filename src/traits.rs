@@ -12,6 +12,10 @@ pub trait Object {
     fn process_weak(&mut self, processor: &mut dyn WeakProcessor) {
         let _ = processor;
     }
+
+    fn trace_range(&self, from: usize, to: usize, visitor: &mut dyn Visitor) {
+        let _ = (from, to, visitor);
+    }
 }
 
 pub trait Visitor {

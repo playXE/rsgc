@@ -6,7 +6,8 @@
     ptr_metadata,
     core_intrinsics,
     specialization,
-    ptr_sub_ptr
+    ptr_sub_ptr,
+    portable_simd
 )]
 #![allow(dead_code, unused_imports, incomplete_features)]
 
@@ -96,3 +97,11 @@ macro_rules! offsetof {
         }
     };
 }
+
+
+#[inline(never)]
+pub fn allocate_i32(thread: &mut heap::thread::Thread, x: i32) -> object::Handle<i32> {
+    thread.allocate_fixed(x)
+}
+
+pub use heap::thread;

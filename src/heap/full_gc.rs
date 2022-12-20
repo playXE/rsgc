@@ -10,7 +10,7 @@ use crate::heap::concurrent_gc::PrepareUnsweptRegions;
 use crate::heap::controller::GCMode;
 use crate::heap::safepoint::SafepointSynchronize;
 use crate::heap::sweeper::SweepGarbageClosure;
-use crate::heap::thread::ThreadInfo;
+use crate::heap::thread::Thread;
 use crate::object::HeapObjectHeader;
 use crate::traits::Visitor;
 use parking_lot::lock_api::RawMutex;
@@ -41,6 +41,7 @@ impl FullGC {
         log::debug!(target: "gc-safepoint", "stopped the world ({} thread(s)) in {} ms", threads.len(), start.elapsed().as_millis());
         let phase = PausePhase::new("Init Mark");
         self.heap.prepare_gc();
+        self.heap.clear_cancelled_gc();
         // Phase 0: retire TLABs
         for thread in threads.iter().copied() {
             (*thread).tlab.retire((*thread).id);
@@ -49,7 +50,7 @@ impl FullGC {
         {
             let phase = PausePhase::new("Marking");
             // Phase 1: Mark
-            self.do_mark(threads);
+            self.do_mark(&threads);
             drop(phase);
         }
 
@@ -87,10 +88,10 @@ impl FullGC {
         self.heap.lock.unlock();
         drop(phase);
         log::debug!(target: "gc", "STW Mark-and-Sweep done in {} ms, {} live regions after sweep", start.elapsed().as_millis(), closure.live.load(std::sync::atomic::Ordering::Relaxed));
-        SafepointSynchronize::end();
+        SafepointSynchronize::end(threads);
     }
 
-    unsafe fn do_mark(&mut self, threads: &[*mut ThreadInfo]) {
+    unsafe fn do_mark(&mut self, threads: &[*mut Thread]) {
         let mark = STWMark::new();
         mark.mark(&threads);
     }
@@ -142,7 +143,7 @@ impl FullGC {
 
     }*/
 
-    unsafe fn mark_thread(&mut self, thread: *mut ThreadInfo) {
+    unsafe fn mark_thread(&mut self, thread: *mut Thread) {
         let mut begin = (*thread).stack_start();
         let mut end = (*thread).last_sp();
         if end.is_null() {

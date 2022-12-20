@@ -1,4 +1,4 @@
-use std::{collections::HashSet, intrinsics::unlikely, sync::atomic::AtomicUsize};
+use std::{collections::HashSet, intrinsics::unlikely, ptr::null_mut, sync::atomic::AtomicUsize};
 
 use crossbeam_queue::SegQueue;
 use parking_lot::{lock_api::RawMutex, Mutex};
@@ -14,57 +14,57 @@ pub struct SweepGarbageClosure {
     pub heap: &'static Heap,
     pub concurrent: bool,
     pub live: AtomicUsize,
-    pub freed: AtomicUsize
+    pub freed: AtomicUsize,
 }
 
 impl SweepGarbageClosure {
     pub unsafe fn sweep_region(heap: &Heap, region: *mut HeapRegion) -> bool {
+        let marking_context = heap.marking_context();
         let mut begin = (*region).bottom();
         let mut start_of_gap = begin;
         let end = begin + heap.options().region_size_bytes;
         (*region).free_list.clear();
+        //(*region).invoke_destructors(marking_context);
         (*region).object_start_bitmap.clear();
         let mut used = 0;
         let mut free = 0;
-        let marking_context = heap.marking_context();
-        while begin != end {
-            let header = begin as *mut HeapObjectHeader;
 
-            let size = (*header).heap_size();
-            if (*header).is_free() {
+        if marking_context.is_marked_range(begin, end) {
+            while begin != end {
+                let header = begin as *mut HeapObjectHeader;
+
+                let size = (*header).heap_size();
+                if (*header).is_free() {
+                    begin += size;
+                    continue;
+                }
+
+                if !marking_context.is_marked(header) {
+                    begin += size;
+                    continue;
+                }
+
+                let header_address = header as usize;
+
+                if start_of_gap != header_address {
+                    let new_free_list_entry_size = header_address - start_of_gap;
+                    free += new_free_list_entry_size;
+                    (*region)
+                        .free_list
+                        .add(start_of_gap as _, new_free_list_entry_size);
+                    (*region).largest_free_list_entry =
+                        std::cmp::max((*region).largest_free_list_entry, new_free_list_entry_size);
+                }
+
+                used += size;
+                (*region).object_start_bitmap.set_bit(header as _);
                 begin += size;
-                continue;
+
+                start_of_gap = begin;
             }
-
-            if !marking_context.is_marked(header) {
-                /*if unlikely((*header).vtable().light_finalizer) {
-                    ((*header).vtable().finalize)(header.add(1).cast());
-                }*/
-                begin += size;
-                continue;
-            }
-
-            let header_address = header as usize;
-
-            if start_of_gap != header_address {
-                let new_free_list_entry_size = header_address - start_of_gap;
-                free += new_free_list_entry_size;
-                (*region)
-                    .free_list
-                    .add(start_of_gap as _, new_free_list_entry_size);
-                (*region).largest_free_list_entry =
-                    std::cmp::max((*region).largest_free_list_entry, new_free_list_entry_size);
-            }
-
-            used += size;
-            (*region).object_start_bitmap.set_bit(header as _);
-            begin += size;
-
-            start_of_gap = begin;
         }
 
         if start_of_gap != end {
-           
             let size = (*region).bottom() + heap.options().region_size_bytes - start_of_gap;
             (*region).free_list.add(start_of_gap as _, size);
             (*region).largest_free_list_entry =
@@ -79,72 +79,6 @@ impl SweepGarbageClosure {
         (*region).last_sweep_free = free;
 
         start_of_gap == (*region).bottom()
-
-        /*let mut used_in_bytes = 0;
-        let mut free = 0;
-        let start = (*region).bottom();
-        let end = (*region).end();
-
-        let mut current = start;
-        (*region).object_start_bitmap.clear();
-        (*region).free_list.clear();
-
-        #[cfg(debug_assertions)]
-        let mut free_set = HashSet::<usize>::new();
-
-        while current < end {
-            let raw_obj = current as *mut HeapObjectHeader;
-
-            let mut obj_size = (*raw_obj).heap_size();
-
-            if (*raw_obj).is_marked() {
-                (*raw_obj).clear_marked();
-
-                (*region).object_start_bitmap.set_bit(raw_obj as _);
-                used_in_bytes += obj_size;
-            } else {
-                let mut free_end = current + obj_size;
-
-                while free_end < end {
-                    let next_obj = free_end as *mut HeapObjectHeader;
-                    if (*next_obj).is_marked() {
-                        break;
-                    }
-                    if !(*next_obj).is_free() {
-                        if unlikely((*next_obj).vtable().light_finalizer) {
-                            ((*next_obj).vtable().finalize)(next_obj.add(1).cast());
-                        }
-                    }
-                    debug_assert!((*next_obj).heap_size() != 0x42 && (*next_obj).heap_size() != 0, "heap object {:p} with zero size ({:p} vt)", next_obj, (*next_obj).vtable());
-                    free_end += (*next_obj).heap_size();
-                }
-                obj_size = free_end - current;
-
-                #[cfg(debug_assertions)]
-                {
-                    core::ptr::write_bytes(current as *mut u8, 0x42, obj_size);
-                    if !free_set.insert(current) {
-                        panic!("double free: {:p}", current as *mut u8);
-                    }
-                }
-
-                (*region).free_list.add(current as _, obj_size);
-                (*region).largest_free_list_entry =
-                    std::cmp::max((*region).largest_free_list_entry, obj_size);
-
-                free += obj_size;
-            }
-
-            current += obj_size;
-        }
-
-        (*region).last_sweep_free = free;
-        (*region).set_used(used_in_bytes);
-
-        if used_in_bytes == 0 {
-            assert!(free != 0, "no used objects in region means there is free memory");
-        }
-        used_in_bytes == 0*/
     }
 }
 
@@ -159,7 +93,12 @@ impl HeapRegionClosure for SweepGarbageClosure {
                     let humongous_obj = (*r).bottom() as *mut HeapObjectHeader;
 
                     if !self.heap.marking_context().is_marked(humongous_obj) {
-                        self.freed.fetch_add(self.heap.options().required_regions((*humongous_obj).heap_size()), atomic::Ordering::AcqRel);
+                        self.freed.fetch_add(
+                            self.heap
+                                .options()
+                                .required_regions((*humongous_obj).heap_size()),
+                            atomic::Ordering::AcqRel,
+                        );
                         self.heap.trash_humongous_region_at(r);
                     } else {
                         self.live.fetch_add(1, std::sync::atomic::Ordering::AcqRel);

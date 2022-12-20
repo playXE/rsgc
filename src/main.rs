@@ -1,7 +1,9 @@
+use std::{iter, sync::Arc};
+
 use rsgc::{
     env::read_uint_from_env,
-    heap::{heap::Heap, region::HeapArguments, thread::ThreadInfo},
-    object::{Allocation, Handle},
+    heap::{heap::Heap, region::HeapArguments, thread::{Thread, SafeScope}, GCHeuristic},
+    object::{Allocation, Handle, Array},
     traits::Object,
 };
 
@@ -25,9 +27,10 @@ impl Object for TreeNode {
     }
 }
 
+
 impl Allocation for TreeNode {
     const FINALIZE: bool = false;
-    const LIGHT_FINALIZER: bool = false;
+    const DESTRUCTIBLE: bool = false;
 }
 
 impl TreeNode {
@@ -41,7 +44,7 @@ impl TreeNode {
     }
 }
 
-fn create_tree(thread: &mut ThreadInfo, mut depth: i64) -> Handle<TreeNode> {
+fn create_tree(thread: &mut Thread, mut depth: i64) -> Handle<TreeNode> {
     thread.safepoint();
     let mut node = thread.allocate_fixed(TreeNode {
         left: None,
@@ -64,7 +67,7 @@ fn create_tree(thread: &mut ThreadInfo, mut depth: i64) -> Handle<TreeNode> {
 fn loops(iterations: i64, depth: i64) {
     let mut check = 0;
     let mut item = 0;
-    let th = rsgc::heap::thread::thread();
+    let th = Thread::current();
     while {
         th.safepoint();
         check += create_tree(th, depth).as_ref().check_tree();
@@ -79,8 +82,6 @@ fn loops(iterations: i64, depth: i64) {
 }
 
 fn trees(max_depth: i64) {
-    let long_lasting_tree = create_tree(rsgc::heap::thread::thread(), max_depth);
-
     let mut depth = 4;
 
     while {
@@ -90,11 +91,6 @@ fn trees(max_depth: i64) {
         depth <= max_depth
     } {}
 
-    println!(
-        "long lived tree of depth {}\t check: {}",
-        max_depth,
-        long_lasting_tree.as_ref().check_tree()
-    );
 }
 
 #[inline(never)]
@@ -102,7 +98,44 @@ fn trees(max_depth: i64) {
 fn bench() {
     let max_depth = match read_uint_from_env("TREE_DEPTH") {
         Some(x) if x > 6 => x,
-        _ => 6,
+        _ => 21,
+    };
+
+    let start = std::time::Instant::now();
+    let stretch_depth = max_depth + 1;
+
+    {
+        println!(
+            "stretch tree of depth {}\t check: {}",
+            stretch_depth,
+            create_tree(Thread::current(), stretch_depth as _)
+                .as_ref()
+                .check_tree()
+        );
+    }
+    let long_lasting_tree = create_tree(Thread::current(), max_depth as _);
+    trees(max_depth as _);
+
+    println!(
+        "long lived tree of depth {}\t check: {}",
+        max_depth,
+        long_lasting_tree.as_ref().check_tree()
+    );
+
+    println!(
+        "binary trees took: {:03} secs",
+        start.elapsed().as_micros() as f64 / 1000.0 / 1000.0
+    );
+}
+
+
+/* 
+fn bench_parallel() {
+    let min_depth = 4;
+    let max_depth = match read_uint_from_env("TREE_DEPTH") {
+        Some(x) if x < min_depth + 2 => min_depth + 2,
+        Some(x) => x,
+        _ => 21,
     };
 
     let start = std::time::Instant::now();
@@ -118,57 +151,56 @@ fn bench() {
         );
     }
 
-    trees(max_depth as _);
+
+
+    let long_lasting_tree = create_tree(rsgc::heap::thread::thread(), max_depth as _);
+    use parking_lot::Mutex;
+    let results =  Arc::new((0..(max_depth - min_depth) / 2 + 1).map(|_| Mutex::new(String::new())).collect::<Vec<_>>());
+    let safe_scope = SafeScope::new(rsgc::heap::thread::thread());
+    std::thread::scope(|scope| {
+        let mut d = min_depth;
+       
+        while d <= max_depth {
+            let depth = d;
+            let cloned = results.clone();
+            scope.spawn(move || {
+                let thread = rsgc::heap::thread::thread();
+                let iterations = 1 << (max_depth - depth + min_depth);
+                let mut check = 0;
+                for _ in 1..iterations {    
+                    let tree_node = create_tree(thread, depth as _);
+                    check += tree_node.as_ref().check_tree();
+                }
+                
+                
+                *cloned[(depth - min_depth) / 2].lock() = format!("{}\t trees of depth {}\t check: {}", iterations, depth, check);
+            });
+
+            d += 2;   
+        }
+
+        
+    });
+    drop(safe_scope);
+    for result in results.iter() {
+        println!("{}", *result.lock());
+    }
+    println!(
+        "long lived tree of depth {}\t check: {}",
+        max_depth,
+        long_lasting_tree.as_ref().check_tree()
+    );
 
     println!(
-        "binary trees took: {} secs",
+        "binary trees took: {:03} secs",
         start.elapsed().as_micros() as f64 / 1000.0 / 1000.0
     );
-}
-
-struct List {
-    next: Option<Handle<List>>,
-    val: usize
-}
-
-impl Object for List {
-    fn trace(&self, visitor: &mut dyn rsgc::traits::Visitor) {
-        match self.next {
-            Some(ref obj) => obj.trace(visitor),
-            _ => ()
-        }
-    }
-}
-
-impl Allocation for List {}
+}*/
 
 fn main() {
     env_logger::init();
     let args = HeapArguments::from_env();
-    let _ = Heap::new(args);
-    /* 
-    let thread = rsgc::heap::thread::thread();
-    let mut list =  thread.allocate_fixed(List {
-        next: None,
-        val: 0
+    rsgc::thread::main_thread(args, |_| {
+        bench();
     });
-
-    for i in 0..16 * 1024 * 1024 * 100 {
-        if i % 10 * 1024 == 0 {
-            list = thread.allocate_fixed(List {
-                next: None,
-                val: i
-            });
-        } else {
-            let mut new = thread.allocate_fixed(List {
-                next: None,
-                val: i
-            });
-            new.as_mut().next = Some(list);
-            thread.write_barrier(new);
-            list = new;
-        }
-    }*/
-
-    bench();
 }

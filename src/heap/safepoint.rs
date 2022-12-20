@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use parking_lot::{lock_api::RawMutex, Condvar, Mutex};
 use std::{
     ptr::null_mut,
@@ -6,11 +7,19 @@ use std::{
 #[cfg(target_family = "windows")]
 use winapi::um::{memoryapi::*, winnt::*};
 
-use crate::heap::thread::threads;
+use crate::{heap::thread::threads, sync::mutex::MutexGuard};
 
-use super::{heap::heap, signals::install_signal_handlers, thread::ThreadInfo};
+use super::{
+    heap::heap,
+    signals::install_signal_handlers,
+    thread::Thread,
+    virtual_memory::{page_size, Protection, VirtualMemory},
+};
 
-pub(crate) static SAFEPOINT_PAGE: AtomicPtr<u8> = AtomicPtr::new(null_mut());
+pub(crate) static SAFEPOINT_PAGE: Lazy<VirtualMemory> = Lazy::new(|| {
+    VirtualMemory::allocate_aligned(page_size(), page_size(), false, "safepoint page")
+        .expect("could not allocate GC synchronization page")
+});
 pub(crate) static SAFEPOINT_ENABLE_CNT: AtomicU8 = AtomicU8::new(0);
 
 pub(crate) static SAFEPOINT_LOCK: Mutex<()> = Mutex::const_new(parking_lot::RawMutex::INIT, ());
@@ -18,13 +27,7 @@ pub(crate) static SAFEPOINT_COND: Condvar = Condvar::new();
 pub(crate) static GC_RUNNING: AtomicU32 = AtomicU32::new(0);
 
 pub fn addr_in_safepoint(addr: usize) -> bool {
-    let page = SAFEPOINT_PAGE.load(Ordering::Relaxed);
-    if page.is_null() {
-        // ?? unreachable actually
-        return false;
-    }
-    let page = page as usize;
-    addr >= page && addr < page + 4096
+    SAFEPOINT_PAGE.contains(addr)
 }
 
 pub fn enable() {
@@ -32,30 +35,13 @@ pub fn enable() {
         return;
     }
 
-    let pageaddr = SAFEPOINT_PAGE.load(std::sync::atomic::Ordering::Relaxed);
     #[cfg(not(feature = "conditional-safepoint"))]
-    unsafe {
-        #[cfg(not(windows))]
-        {
-            libc::mprotect(
-                pageaddr as _,
-                super::virtual_memory::page_size(),
-                libc::PROT_NONE,
-            );
-        }
-        #[cfg(windows)]
-        {
-            let mut odl_prot = 0;
-            VirtualProtect(
-                pageaddr as _,
-                super::virtual_memory::page_size() as _,
-                PAGE_NOACCESS,
-                &mut old_prot,
-            );
-        }
+    {
+        SAFEPOINT_PAGE.protect(Protection::NoAccess);
     }
     #[cfg(feature = "conditional-safepoint")]
     unsafe {
+        let pageaddr = SAFEPOINT_PAGE.address();
         pageaddr.write(1);
     }
 }
@@ -64,63 +50,24 @@ pub fn disable() {
         return;
     }
 
-    let pageaddr = SAFEPOINT_PAGE.load(std::sync::atomic::Ordering::Relaxed);
-
     #[cfg(not(feature = "conditional-safepoint"))]
-    unsafe {
-        #[cfg(not(windows))]
-        {
-            libc::mprotect(
-                pageaddr as _,
-                super::virtual_memory::page_size(),
-                libc::PROT_READ,
-            );
-        }
-        #[cfg(windows)]
-        {
-            let mut odl_prot = 0;
-            VirtualProtect(
-                pageaddr as _,
-                super::virtual_memory::page_size() as _,
-                PAGE_READONLY,
-                &mut old_prot,
-            );
-        }
+    {
+        SAFEPOINT_PAGE.protect(Protection::ReadWrite);
     }
 
     #[cfg(feature = "conditional-safepoint")]
     unsafe {
+        let pageaddr = SAFEPOINT_PAGE.address();
         pageaddr.write(0);
     }
 }
 
 pub fn init() {
-    unsafe {
-        let pgsz = super::virtual_memory::page_size();
-        let mut addr;
-        cfg_if::cfg_if! {
-            if #[cfg(windows)] {
-                addr = VirtualProtect(core::ptr::null_mut(), pgsz, MEM_COMMIT, if cfg!(feature="conditional-safepoint") { PAGE_READWRITE } else { PAGE_READONLY }) as *mut u8;
-                addr = addr;
-            } else {
-                addr = libc::mmap(null_mut(), pgsz, if cfg!(feature="conditional-safepoint") { libc::PROT_WRITE | libc::PROT_READ } else { libc::PROT_READ }, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) as *mut u8;
-                if addr == libc::MAP_FAILED as *mut u8 {
-                    addr = null_mut();
-                }
-            }
-        };
-
-        if addr.is_null() {
-            panic!("could not allocate GC synchronization page");
-        }
-
-        SAFEPOINT_PAGE.store(addr, std::sync::atomic::Ordering::Relaxed);
-    }
+    let _ = SAFEPOINT_PAGE.address();
     install_signal_handlers();
 }
 
 pub fn enter() -> bool {
-    assert!(!SAFEPOINT_LOCK.is_locked());
     let guard = SAFEPOINT_LOCK.lock();
 
     match GC_RUNNING.compare_exchange(0, 1, Ordering::Relaxed, Ordering::SeqCst) {
@@ -162,7 +109,6 @@ pub fn wait_gc() {
     }
 }
 
-
 pub const SAFEPOINT_UNSYNCHRONIZED: u8 = 0;
 pub const SAFEPOINT_SYNCHRONIZING: u8 = 1;
 pub const SAFEPOINT_SYNCHRONIZED: u8 = 2;
@@ -172,15 +118,14 @@ static SAFEPOINT_STATE: AtomicU8 = AtomicU8::new(0);
 pub struct SafepointSynchronize {}
 
 impl SafepointSynchronize {
-    pub(crate) unsafe fn begin() -> &'static [*mut ThreadInfo] {
+    pub(crate) unsafe fn begin() -> MutexGuard<'static, Vec<*mut Thread>> {
         heap().safepoint_synchronize_begin();
 
-        let threads = threads();
-        threads.get().lock.lock();
-        
+        let threads = threads().get();
+
         assert!(enter());
         SAFEPOINT_STATE.store(SAFEPOINT_SYNCHRONIZING, Ordering::Release);
-        for thread in threads.get().threads.iter().copied() {
+        for thread in threads.iter().copied() {
             let th = &*thread;
             while th.atomic_gc_state().load(Ordering::Relaxed) == 0
                 || th.atomic_gc_state().load(Ordering::Acquire) == 0
@@ -191,13 +136,13 @@ impl SafepointSynchronize {
 
         SAFEPOINT_STATE.store(SAFEPOINT_SYNCHRONIZED, Ordering::Release);
 
-        &threads.get().threads
+        threads
     }
 
-    pub(crate) unsafe fn end() {
+    pub(crate) unsafe fn end(guard: MutexGuard<'static, Vec<*mut Thread>>) {
         heap().safepoint_synchronize_end();
-        threads().get().lock.unlock();
         end();
+        drop(guard);
         SAFEPOINT_STATE.store(SAFEPOINT_UNSYNCHRONIZED, Ordering::Release);
     }
 

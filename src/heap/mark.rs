@@ -12,7 +12,7 @@ use crate::traits::Visitor;
 use super::heap::{heap, Heap};
 use super::marking_context::MarkingContext;
 use super::root_processor::RootsCollector;
-use super::thread::ThreadInfo;
+use super::thread::Thread;
 
 pub struct Terminator {
     const_nworkers: usize,
@@ -106,14 +106,14 @@ impl<'a> MarkingTask<'a> {
         }
     }
 
-    pub fn pop(&mut self) -> Option<Address> {
+    pub fn pop(&mut self) -> Option<MarkTask> {
         self.pop_local()
             .or_else(|| self.pop_worker())
             .or_else(|| self.pop_global())
             .or_else(|| self.steal())
     }
 
-    fn pop_local(&mut self) -> Option<Address> {
+    fn pop_local(&mut self) -> Option<MarkTask> {
         if self.local.is_empty() {
             return None;
         }
@@ -122,23 +122,23 @@ impl<'a> MarkingTask<'a> {
         Some(obj)
     }
 
-    fn pop_worker(&mut self) -> Option<Address> {
+    fn pop_worker(&mut self) -> Option<MarkTask> {
         self.mark_ctx.mark_queues().worker(self.task_id).pop()
     }
 
-    fn worker(&self) -> &Worker<usize> {
+    fn worker(&self) -> &Worker<MarkTask> {
         self.mark_ctx.mark_queues().worker(self.task_id)
     }
 
-    fn stealers(&self) -> &[Stealer<usize>] {
+    fn stealers(&self) -> &[Stealer<MarkTask>] {
         self.mark_ctx.mark_queues().stealers()
     }
 
-    fn injector(&self) -> &Injector<usize> {
+    fn injector(&self) -> &Injector<MarkTask> {
         self.mark_ctx.mark_queues().injector()
     }
 
-    fn pop_global(&mut self) -> Option<Address> {
+    fn pop_global(&mut self) -> Option<MarkTask> {
         loop {
             let result = self
                 .mark_ctx
@@ -156,7 +156,7 @@ impl<'a> MarkingTask<'a> {
         None
     }
 
-    fn steal(&self) -> Option<Address> {
+    fn steal(&self) -> Option<MarkTask> {
         if self.stealers().len() == 1 {
             return None;
         }
@@ -203,40 +203,67 @@ impl<'a> MarkingTask<'a> {
     }
 
     pub fn run<const CANCELLABLE: bool>(&mut self) {
+        let stride = self.heap.options().mark_loop_stride;
+
         loop {
-            let object_addr = if let Some(addr) = self.pop() {
-                addr
-            } else if CANCELLABLE && self.heap.check_cancelled_gc_and_yield(true) {
+            if CANCELLABLE && self.heap.check_cancelled_gc_and_yield(true) {
                 break;
-            } else {
+            }
+            let mut work = 0;
+            for _ in 0..stride {
+                if let Some(task) = self.pop() {
+                    unsafe {
+                        self.do_task(task);
+                    }
+                    work += 1;
+                } else {
+                    break;
+                }
+            }
+
+            if work == 0 {
                 let stsl = SuspendibleThreadSetLeaver::new(CANCELLABLE);
                 if self.terminator.try_terminate() {
                     break;
                 }
                 drop(stsl);
                 continue;
-            };
-
-            let object = object_addr as *mut HeapObjectHeader;
-            unsafe {
-                (*object).visit(self);
             }
         }
     }
 
-    pub fn push(&mut self, obj: *mut HeapObjectHeader) {
+    unsafe fn do_task(&mut self, task: MarkTask) {
+        let obj = task.obj();
+        if task.is_not_chunked() {
+            if !(*obj).vtable().varsize.is_varsize {
+                (*obj).visit(self);
+            } else if (*obj).vtable().varsize.is_varsize {
+                self.do_chunked_array_start(obj);
+            } else {
+                // primitive array or no heap pointers
+            }
+        } else {
+            self.do_chunked_array(obj, task.chunk() as _, task.pow() as _);
+        }
+    }
+
+    pub fn push(&mut self, obj: MarkTask) {
+        debug_assert!(self.heap.is_in(obj.obj() as _));
         if self.local.has_capacity() {
-            self.local.push(obj as _);
+            self.local.push(obj);
             self.defensive_push();
         } else {
-            self.worker().push(obj as _);
+            self.worker().push(obj);
         }
     }
 
     pub unsafe fn try_mark(&mut self, obj: *mut u8) {
+
         let obj = obj.cast::<HeapObjectHeader>().sub(1);
         if self.mark_ctx.mark(obj) {
-            self.push(obj);
+            if (*obj).should_trace() {
+                self.push(MarkTask::new(obj, false, false));
+            }
         }
     }
 
@@ -251,6 +278,98 @@ impl<'a> MarkingTask<'a> {
         }
 
         self.try_mark(object.add(1) as *mut u8);
+    }
+
+    unsafe fn do_chunked_array_start(&mut self, obj: *mut HeapObjectHeader) {
+        let len = (*obj).array_length();
+        ((*obj).vtable().trace)(obj.add(1).cast(), self);
+        if let Some(iter) = (*obj).vtable().varsize.iterate_range {
+            if len <= 2048 * 2 {
+                // a few slices only, process directly
+
+                iter(obj.add(1).cast(), 0, len, self);
+            } else {
+                let mut bits = log2i_graceful(len);
+
+                // Compensate for non-power-of-two arrays, cover the array in excess:
+                if len as isize != (1 << bits) {
+                    bits += 1;
+                }
+
+                // Only allow full chunks on the queue. This frees do_chunked_array() from checking from/to
+                // boundaries against array->length(), touching the array header on every chunk.
+                //
+                // To do this, we cut the prefix in full-sized chunks, and submit them on the queue.
+                // If the array is not divided in chunk sizes, then there would be an irregular tail,
+                // which we will process separately.
+
+                let mut last_idx = 0;
+                let mut chunk = 1;
+                let mut pow = bits;
+                // Handle overflow
+                if pow >= 31 {
+                    assert_eq!(pow, 31, "sanity");
+                    pow -= 1;
+
+                    chunk = 2;
+                    last_idx = 1 << pow;
+                    self.push(MarkTask::new2(obj, true, false, chunk as _, pow as _));
+                }
+
+                // Split out tasks, as suggested in ShenandoahMarkTask docs. Record the last
+                // successful right boundary to figure out the irregular tail.
+                while (1 << pow) > 2048 && (chunk * 2 < MarkTask::chunk_size() as isize) {
+                    pow -= 1;
+                    let left_chunk = chunk * 2 - 1;
+                    let right_chunk = chunk * 2;
+
+                    let left_chunk_end = left_chunk * (1 << pow);
+
+                    if left_chunk_end < len as isize {
+                        self.push(MarkTask::new2(obj, true, false, left_chunk as _, pow as _));
+                        chunk = right_chunk;
+                        last_idx = left_chunk_end;
+                    } else {
+                        chunk = left_chunk;
+                    }
+                }
+                // Process the irregular tail, if present
+                let from = last_idx;
+                if from < len as isize {
+                    iter(obj.add(1).cast(), from as _, len, self);
+                }
+            }
+        }
+    }
+
+    unsafe fn do_chunked_array(
+        &mut self,
+        obj: *mut HeapObjectHeader,
+        mut chunk: i32,
+        mut pow: i32,
+    ) {
+        let varsize = &(*obj).vtable().varsize;
+
+        while (1 << pow) > 2048 && (chunk * 2 < MarkTask::chunk_size() as i32) {
+            pow -= 1;
+            chunk *= 2;
+
+            self.push(MarkTask::new2(
+                obj,
+                true,
+                false,
+                chunk as usize - 1,
+                pow as _,
+            ));
+        }
+
+        let chunk_size = 1 << pow;
+        let from = (chunk - 1) * chunk_size;
+        let to = chunk * chunk_size;
+
+        if let Some(iter) = varsize.iterate_range {
+            iter(obj.add(1).cast(), from as _, to as _, self);
+        }
     }
 }
 
@@ -273,7 +392,7 @@ impl<'a> Visitor for MarkingTask<'a> {
 const SEGMENT_SIZE: usize = 64;
 
 struct Segment {
-    data: Vec<Address>,
+    data: Vec<MarkTask>,
 }
 
 impl Segment {
@@ -287,7 +406,7 @@ impl Segment {
         Segment { data: Vec::new() }
     }
 
-    fn with(addr: usize) -> Segment {
+    fn with(addr: MarkTask) -> Segment {
         let mut segment = Segment::new();
         segment.data.push(addr);
 
@@ -302,12 +421,12 @@ impl Segment {
         self.data.is_empty()
     }
 
-    fn push(&mut self, addr: Address) {
+    fn push(&mut self, addr: MarkTask) {
         debug_assert!(self.has_capacity());
         self.data.push(addr);
     }
 
-    fn pop(&mut self) -> Option<Address> {
+    fn pop(&mut self) -> Option<MarkTask> {
         self.data.pop()
     }
 
@@ -317,9 +436,9 @@ impl Segment {
 }
 
 pub struct MarkQueueSet {
-    workers: Vec<Worker<usize>>,
-    stealers: Vec<Stealer<usize>>,
-    injector: Injector<usize>,
+    workers: Vec<Worker<MarkTask>>,
+    stealers: Vec<Stealer<MarkTask>>,
+    injector: Injector<MarkTask>,
 }
 
 impl MarkQueueSet {
@@ -343,15 +462,15 @@ impl MarkQueueSet {
         }
     }
 
-    pub fn worker(&self, id: usize) -> &Worker<usize> {
+    pub fn worker(&self, id: usize) -> &Worker<MarkTask> {
         &self.workers[id]
     }
 
-    pub fn stealer(&self, id: usize) -> &Stealer<usize> {
+    pub fn stealer(&self, id: usize) -> &Stealer<MarkTask> {
         &self.stealers[id]
     }
 
-    pub fn stealers(&self) -> &[Stealer<usize>] {
+    pub fn stealers(&self) -> &[Stealer<MarkTask>] {
         &self.stealers
     }
 
@@ -359,7 +478,7 @@ impl MarkQueueSet {
         self.workers.len()
     }
 
-    pub fn injector(&self) -> &Injector<usize> {
+    pub fn injector(&self) -> &Injector<MarkTask> {
         &self.injector
     }
 }
@@ -371,7 +490,7 @@ impl STWMark {
         Self {}
     }
 
-    pub fn mark(&self, threads: &[*mut ThreadInfo]) {
+    pub fn mark(&self, threads: &[*mut Thread]) {
         let heap = heap();
         let mut mark_stack = {
             let mut root_collector = RootsCollector::new(heap);
@@ -381,7 +500,7 @@ impl STWMark {
 
         let injector = heap.marking_context().mark_queues().injector();
         while let Some(obj) = mark_stack.pop() {
-            injector.push(obj as usize);
+            injector.push(MarkTask::new(obj, false, false));
         }
 
         let mc = heap.marking_context();
@@ -406,4 +525,270 @@ impl STWMark {
             }
         });
     }
+}
+
+use crate::utils::*;
+cfg_if::cfg_if! {
+if #[cfg(target_pointer_width="64")] {
+
+    /// MarkTask
+    ///
+    /// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
+    /// The design goal is to make the regular obj ops very fast, because that would be the prevailing
+    /// case. On the other hand, it should not block parallel array processing from efficiently dividing
+    /// the array work.
+    ///
+    /// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
+    /// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
+    /// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
+    /// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
+    /// all possible arrays.
+    ///
+    ///    |xx-------obj---------|-pow-|--chunk---|
+    ///    0                    49     54        64
+    ///
+    /// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
+    ///
+    /// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
+    /// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
+    /// and "weak". This aligns with their frequent values: strong/counted-live references.
+    ///
+    /// This encoding gives a few interesting benefits:
+    ///
+    /// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
+    ///
+    ///    |---------obj---------|00000|0000000000| /// no chunk data
+    ///
+    ///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
+    ///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
+    ///
+    /// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
+    /// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
+    ///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
+    ///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
+    ///
+    ///    Observe that the union of these two intervals is:
+    ///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
+    ///
+    ///    ...which is the original interval:
+    ///      [ (C-1)*2^P; C*2^P )
+    ///
+    /// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
+    ///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
+    ///
+    /// Encoding limitations caused by current bitscales mean:
+    ///    10 bits for chunk: max 1024 blocks per array
+    ///     5 bits for power: max 2^32 array
+    ///    49 bits for   obj: max 512 TB of addressable space
+    ///
+    /// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
+    /// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
+    /// In future, these might be rebalanced to favor one degree of freedom against another. For example,
+    /// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
+    /// some bits back if chunks are counted in ObjArrayMarkingStride units.
+    ///
+    /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
+    /// bits from the native pointer. It is useful to debug the optimized version.
+    ///
+            #[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Hash, Eq, Ord)]
+            pub struct MarkTask {
+                /// Everything is encoded into this field...
+                obj: usize,
+            }
+
+
+            impl MarkTask {
+                pub const CHUNK_BITS: usize = 10;
+                pub const POW_BITS: usize = 5;
+                pub const OOP_BITS: usize = std::mem::size_of::<usize>() * 8 - Self::CHUNK_BITS - Self::POW_BITS;
+
+                pub const OOP_SHIFT: usize = 0;
+                pub const POW_SHIFT: usize = Self::OOP_BITS;
+                pub const CHUNK_SHIFT: usize = Self::OOP_BITS + Self::POW_BITS;
+
+                pub const OOP_EXTRACT_MASK: usize = right_nth_bit(Self::OOP_BITS) - 3;
+                pub const SKIP_LIVE_EXTRACT_MASK: usize = 1 << 0;
+                pub const WEAK_EXTRACT_MASK: usize = 1 << 1;
+                pub const CHUNK_POW_EXTRACT_MASK: usize = !right_nth_bit(Self::OOP_BITS);
+
+                pub const CHUNK_RANGE_MASK: usize = right_nth_bit(Self::CHUNK_BITS);
+                pub const POW_RANGE_MASK: usize = right_nth_bit(Self::POW_BITS);
+
+                #[inline]
+                pub fn decode_oop(val: usize) -> *mut HeapObjectHeader {
+                    (val & Self::OOP_EXTRACT_MASK) as _
+                }
+
+                #[inline]
+                pub fn decode_not_chunked(val: usize) -> bool {
+                    (val & Self::CHUNK_POW_EXTRACT_MASK) == 0
+                }
+
+                #[inline]
+                pub fn decode_chunk(val: usize) -> usize {
+                    (val >> Self::CHUNK_SHIFT) & Self::CHUNK_RANGE_MASK
+                }
+
+                #[inline]
+                pub fn decode_pow(val: usize) -> usize {
+                    (val >> Self::POW_SHIFT) & Self::POW_RANGE_MASK
+                }
+
+                #[inline]
+                pub fn decode_weak(val: usize) -> bool {
+                    (val & Self::WEAK_EXTRACT_MASK) != 0
+                }
+
+                #[inline]
+                pub fn decode_cnt_live(val: usize) -> bool {
+                    (val & Self::SKIP_LIVE_EXTRACT_MASK) == 0
+                }
+
+                #[inline]
+                pub fn encode_oop(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool) -> usize {
+                    let mut encoded = obj as usize;
+                    if skip_live {
+                        encoded |= Self::SKIP_LIVE_EXTRACT_MASK;
+                    }
+
+                    if weak {
+                        encoded |= Self::WEAK_EXTRACT_MASK;
+                    }
+
+                    encoded
+                }
+
+                #[inline]
+                pub fn encode_chunk(chunk: usize) -> usize {
+                    chunk << Self::CHUNK_SHIFT
+                }
+
+                #[inline]
+                pub fn encode_pow(pow: usize) -> usize {
+                    pow << Self::POW_SHIFT
+                }
+
+                #[inline]
+                pub fn new(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool) -> Self {
+                    Self {
+                        obj: Self::encode_oop(obj, skip_live, weak)
+                    }
+                }
+
+                #[inline]
+                pub fn new2(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool, chunk: usize, pow: usize) -> Self {
+                    let enc_oop = Self::encode_oop(obj, skip_live, weak);
+                    let enc_chunk = Self::encode_chunk(chunk);
+                    let enc_pow = Self::encode_pow(pow);
+
+                    Self {
+                        obj: enc_oop | enc_chunk | enc_pow
+                    }
+                }
+
+                #[inline]
+                pub fn obj(self) -> *mut HeapObjectHeader {
+                    Self::decode_oop(self.obj)
+                }
+
+                #[inline]
+                pub fn chunk(self) -> usize {
+                    Self::decode_chunk(self.obj)
+                }
+
+                #[inline]
+                pub fn pow(self) -> usize {
+                    Self::decode_pow(self.obj)
+                }
+
+                #[inline]
+                pub fn is_not_chunked(self) -> bool {
+                    Self::decode_not_chunked(self.obj)
+                }
+
+                #[inline]
+                pub fn is_weak(self) -> bool {
+                    Self::decode_weak(self.obj)
+                }
+
+                #[inline]
+                pub fn count_liveness(self) -> bool {
+                    Self::decode_cnt_live(self.obj)
+                }
+
+                #[inline]
+                pub fn max_addressable() -> usize {
+                    nth_bit(Self::OOP_BITS)
+                }
+
+                #[inline]
+                pub fn chunk_size() -> usize {
+                    nth_bit(Self::CHUNK_BITS)
+                }
+            }
+
+        } else {
+            /// MarkTask
+    ///
+    /// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
+    /// The design goal is to make the regular obj ops very fast, because that would be the prevailing
+    /// case. On the other hand, it should not block parallel array processing from efficiently dividing
+    /// the array work.
+    ///
+    /// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
+    /// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
+    /// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
+    /// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
+    /// all possible arrays.
+    ///
+    ///    |xx-------obj---------|-pow-|--chunk---|
+    ///    0                    49     54        64
+    ///
+    /// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
+    ///
+    /// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
+    /// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
+    /// and "weak". This aligns with their frequent values: strong/counted-live references.
+    ///
+    /// This encoding gives a few interesting benefits:
+    ///
+    /// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
+    ///
+    ///    |---------obj---------|00000|0000000000| /// no chunk data
+    ///
+    ///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
+    ///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
+    ///
+    /// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
+    /// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
+    ///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
+    ///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
+    ///
+    ///    Observe that the union of these two intervals is:
+    ///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
+    ///
+    ///    ...which is the original interval:
+    ///      [ (C-1)*2^P; C*2^P )
+    ///
+    /// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
+    ///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
+    ///
+    /// Encoding limitations caused by current bitscales mean:
+    ///    10 bits for chunk: max 1024 blocks per array
+    ///     5 bits for power: max 2^32 array
+    ///    49 bits for   obj: max 512 TB of addressable space
+    ///
+    /// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
+    /// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
+    /// In future, these might be rebalanced to favor one degree of freedom against another. For example,
+    /// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
+    /// some bits back if chunks are counted in ObjArrayMarkingStride units.
+    ///
+    /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
+    /// bits from the native pointer. It is useful to debug the optimized version.
+    ///
+            pub struct MarkTask {
+
+            }
+        }
 }

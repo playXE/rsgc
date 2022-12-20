@@ -1,6 +1,6 @@
 use crate::heap::{
     safepoint,
-    thread::{thread, SafeScope, thread_no_register},
+    thread::{Thread, SafeScope},
 };
 use parking_lot::lock_api;
 use parking_lot_core::{
@@ -129,7 +129,7 @@ impl RawMutex {
         let scope = if safepoint {
             // enter GC-safe scope when we're trying to lock the mutex
             // If STW happens GC would not wait for this thread
-            Some(SafeScope::new(unsafe { thread_no_register() }))
+            Some(SafeScope::new(Thread::current()))
         } else {
             None
         };
@@ -624,7 +624,7 @@ impl Condvar {
         let result;
         let mut bad_mutex = false;
         let mut requeued = false;
-        let safe_scope = SafeScope::new(unsafe { thread_no_register() } );
+        let safe_scope = SafeScope::new(Thread::current());
         {
             let addr = self as *const _ as usize;
             let lock_addr = mutex as *const _ as *mut _;

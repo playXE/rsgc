@@ -1,30 +1,34 @@
 use std::{
     mem::{size_of, MaybeUninit},
     ptr::null_mut,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering, AtomicU8},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     time::Instant,
 };
 
 use crate::{
     formatted_size,
     object::HeapObjectHeader,
-    traits::{Visitor, WeakProcessor}, sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
+    sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
+    traits::{Visitor, WeakProcessor},
 };
 
 use super::{
     align_up, align_usize,
     bitmap::HeapBitmap,
+    card_table::{age_card_visitor, CardTable},
     concurrent_thread::ConcurrentGCThread,
     controller::ControlThread,
     free_set::RegionFreeSet,
+    heuristics::{adaptive::AdaptiveHeuristics, compact::CompactHeuristics, Heuristics},
     mark_bitmap::MarkBitmap,
     marking_context::MarkingContext,
     memory_region::MemoryRegion,
     region::{HeapArguments, HeapOptions, HeapRegion},
     safepoint,
-    shared_vars::{SharedFlag, SharedEnumFlag},
-    virtual_memory::{self, VirtualMemory},
-    AllocRequest, thread::{thread, thread_no_register, SafeScope}, heuristics::{Heuristics, compact::CompactHeuristics, adaptive::AdaptiveHeuristics}, GCHeuristic
+    shared_vars::{SharedEnumFlag, SharedFlag},
+    thread::{Thread, SafeScope},
+    virtual_memory::{self, page_size, PlatformVirtualMemory, VirtualMemory, VirtualMemoryImpl},
+    AllocRequest, GCHeuristic,
 };
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 use scoped_thread_pool::Pool;
@@ -40,6 +44,7 @@ pub struct Heap {
     marking_context: &'static mut MarkingContext,
     mem: Box<VirtualMemory>,
     regions_storage: Box<VirtualMemory>,
+    card_table: CardTable,
     regions: Vec<*mut HeapRegion>,
     opts: Box<HeapOptions>,
     free_set: RegionFreeSet,
@@ -80,6 +85,10 @@ impl Heap {
         &self.opts
     }
 
+    pub fn card_table(&self) -> &CardTable {
+        &self.card_table
+    }
+
     pub fn is_concurrent_mark_in_progress(&self) -> bool {
         self.is_concurrent_mark_in_progress.is_set()
     }
@@ -92,8 +101,8 @@ impl Heap {
         }
     }
 
-
     pub fn new(mut args: HeapArguments) -> &'static mut Self {
+        assert!(!INIT.fetch_or(true, Ordering::AcqRel));
         safepoint::init();
         SuspendibleThreadSet::init();
         args.set_heap_size();
@@ -111,32 +120,24 @@ impl Heap {
         let num_min_regions = min_byte_size / opts.region_size_bytes;
         let minimum_size = num_min_regions * opts.region_size_bytes;
 
-        let mem = VirtualMemory::allocate_aligned(
+        let mem = VirtualMemory::<PlatformVirtualMemory>::reserve(
             opts.max_heap_size,
             opts.region_size_bytes,
-            false,
-            false,
-            "heap",
         )
         .unwrap();
 
-        unsafe {
-            let decommit_start = mem.start() + initial_size;
-            if mem.end() - decommit_start != 0 {
-                VirtualMemory::decommit(decommit_start as _, mem.end() - decommit_start);
-                VirtualMemory::dont_need(decommit_start as _, mem.end() - decommit_start);
-            }
-        }
+        PlatformVirtualMemory::commit(mem.address(), initial_size);
 
         let mark_ctx = Box::leak(Box::new(MarkingContext::new(
             MemoryRegion::new(mem.start() as _, mem.size()),
             opts.parallel_gc_threads.max(1),
         )));
 
+        let size = align_usize(opts.region_count * size_of::<HeapRegion>(), page_size());
+
         let regions_mem = VirtualMemory::allocate_aligned(
-            opts.region_count * size_of::<HeapRegion>(),
+            size,
             virtual_memory::page_size(),
-            false,
             false,
             "heap regions",
         )
@@ -146,14 +147,15 @@ impl Heap {
         let heuristics = match heuristics {
             GCHeuristic::Adaptive => AdaptiveHeuristics::new(&opts),
             GCHeuristic::Compact => CompactHeuristics::new(&mut opts),
-            _ => todo!()
+            _ => todo!(),
         };
-
+        let card_table = CardTable::new(mem.address(), mem.size());
         let this = Box::leak(Box::new(Self {
+            card_table,
             object_start_bitmap: HeapBitmap::new(mem.start(), mem.size()),
             regions: vec![null_mut(); opts.region_count],
-            regions_storage: regions_mem,
-            mem,
+            regions_storage: Box::new(regions_mem),
+            mem: Box::new(mem),
             heuristics,
             is_concurrent_mark_in_progress: SharedFlag::new(),
             opts: Box::new(opts),
@@ -200,7 +202,6 @@ impl Heap {
     pub fn min_capacity(&self) -> usize {
         self.minimum_size
     }
-    
 
     pub fn entry_uncommit(&mut self, shrink_before: Instant, shrink_until: usize) {
         // Application allocates from the beginning of the heap.
@@ -384,6 +385,21 @@ impl Heap {
         })
     }
 
+    pub fn process_cards(&mut self, clear: bool) {
+        if clear {
+            self.card_table
+                .clear_card_range(self.mem.start() as _, self.mem.end() as _);
+        } else {
+            // Age cards: if a card is dirty, it is aged by one. If it is not dirty, it is cleared.
+            self.card_table.modify_cards_atomic(
+                self.mem.start() as _,
+                self.mem.end() as _,
+                age_card_visitor,
+                |_, _, _| {},
+            );
+        }
+    }
+
     pub fn max_capacity(&self) -> usize {
         self.regions.len() * self.options().region_size_bytes
     }
@@ -404,48 +420,6 @@ impl Heap {
 
     pub fn heuristics_mut(&mut self) -> &mut dyn Heuristics {
         &mut *self.heuristics
-    }
-
-    pub fn should_start_gc(&self) -> bool {
-        let max_capacity = self.max_capacity();
-        let available = self.free_set().available();
-
-        let threshold_available = max_capacity / 100 * self.options().min_free_threshold;
-        let threshold_bytes_allocated = max_capacity / 100 * self.options().allocation_threshold;
-        if available < threshold_available {
-            log::info!(target: "gc",
-                "Trigger: Free ({}) is below minimum threshold ({})",
-                formatted_size(available),
-                formatted_size(threshold_available)
-            );
-            return true;
-        }
-
-        let bytes_allocated = self.bytes_allocated_since_gc_start.load(Ordering::Relaxed);
-
-        if bytes_allocated > threshold_bytes_allocated {
-            log::info!(target: "gc",
-                "Trigger: Allocated since last cycle ({}) is larger than allocation threshold ({})",
-                formatted_size(bytes_allocated),
-                formatted_size(threshold_bytes_allocated)
-            );
-            return true;
-        }
-
-        if self.options().guaranteed_gc_interval > 0 {
-            let last_time_ms = self.last_cycle_end.elapsed().as_millis();
-
-            if last_time_ms > self.options().guaranteed_gc_interval as _ {
-                log::info!(target: "gc",
-                    "Trigger: Time since last GC ({} ms) is larger than guaranteed interval ({} ms)",
-                    last_time_ms,
-                    self.options().guaranteed_gc_interval
-                );
-                return true;
-            }
-        }
-
-        false
     }
 
     fn allocate_memory_under_lock(
@@ -535,8 +509,6 @@ impl Heap {
         }
     }
 
-
-    
     pub fn parallel_heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
         if self.num_regions() > self.options().parallel_region_stride
             && self.scoped_pool.workers() != 0
@@ -607,7 +579,7 @@ impl Heap {
             }
 
             let bitmap = &(*region).object_start_bitmap;
-            bitmap.set_atomic(addr as usize);
+            bitmap.set_bit(addr as usize);
         }
     }
 
@@ -637,13 +609,8 @@ impl Heap {
     }
 
     pub fn reset_mark_bitmap(&mut self) {
-        /*let clos = ResetBitmapClosure {
-            heap: heap()
-        };
-        self.parallel_heap_region_iterate(&clos);*/
-       
+        //self.marking_context.flip_mark_bit();
         self.marking_context.clear_bitmap_full();
-        
     }
 
     pub unsafe fn get_humongous_start(&self, mut r: *mut HeapRegion) -> *mut HeapRegion {
@@ -691,6 +658,7 @@ impl Heap {
     pub unsafe fn stop(&mut self) {
         let _ = Box::from_raw(self as *mut Self);
         log::debug!("Heap stopped");
+        INIT.store(false, Ordering::Release);
     }
 
     pub fn print_on<W: std::fmt::Write>(&self, st: &mut W) -> std::fmt::Result {
@@ -706,7 +674,6 @@ impl Heap {
         Ok(())
     }
 
-
     pub fn try_cancel_gc(&self) -> bool {
         loop {
             let prev = self.cancelled_gc.cmpxchg(GC_CANCELLABLE, GC_CANCELLED);
@@ -716,7 +683,7 @@ impl Heap {
                 return false;
             }
 
-            let thread = unsafe { thread_no_register() };
+            let thread = Thread::current();
             if thread.is_registered() {
                 // We need to provide a safepoint here, otherwise we might
                 // spin forever if a SP is pending.
@@ -782,16 +749,31 @@ static INIT: AtomicBool = AtomicBool::new(false);
 static mut HEAP: MaybeUninit<HeapRef> = MaybeUninit::uninit();
 
 pub fn heap() -> &'static mut Heap {
+    #[cold]
+    fn heap_uninit() {
+        panic!("heap() called before heap initialized")
+    }
+    if !INIT.load(Ordering::Acquire) {
+        heap_uninit();
+    }
     unsafe { HEAP.assume_init_mut().0 }
 }
 
 pub trait HeapRegionClosure: Send + Sync {
     fn heap_region_do(&self, r: *mut HeapRegion);
+    fn after_processing(&self, count: usize) {
+        let _ = count;
+    }
 }
 
 impl Drop for Heap {
     fn drop(&mut self) {
+        self.cancel_gc();
         self.controller_thread.as_mut().unwrap().stop();
+
+        let _ = unsafe {
+            Box::from_raw(self.marking_context)
+        };
     }
 }
 
@@ -823,6 +805,8 @@ impl<'a> ParallelHeapRegionTask<'a> {
                     let region = heap.get_region(i);
                     self.blk.heap_region_do(region);
                 }
+
+                self.blk.after_processing(end - cur);
             });
         }
     }
@@ -832,7 +816,6 @@ pub struct ParallelHeapRegionTaskWithCancellationCheck<'a> {
     blk: &'a dyn HeapRegionClosure,
     index: AtomicUsize,
 }
-
 
 impl<'a> ParallelHeapRegionTaskWithCancellationCheck<'a> {
     pub fn work<'b>(self, scope: &'b scoped_thread_pool::Scope<'a>) {
@@ -854,9 +837,14 @@ impl<'a> ParallelHeapRegionTaskWithCancellationCheck<'a> {
                     return;
                 }
                 for i in cur..end {
+                    if heap.cancelled_gc() {
+                        return;
+                    }
                     let region = heap.get_region(i);
                     self.blk.heap_region_do(region);
                 }
+
+                self.blk.after_processing(end - cur);
             });
         }
     }
@@ -870,7 +858,7 @@ unsafe impl Send for ResetBitmapClosure {}
 unsafe impl Sync for ResetBitmapClosure {}
 
 impl HeapRegionClosure for ResetBitmapClosure {
-    fn heap_region_do(&self, r: *mut HeapRegion) {
-        self.heap.marking_context().clear_bitmap(r);
+    fn heap_region_do(&self, _r: *mut HeapRegion) {
+        //self.heap.marking_context().flip_mark_bit();
     }
 }

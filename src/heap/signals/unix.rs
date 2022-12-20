@@ -2,7 +2,7 @@ use std::ptr::null_mut;
 
 use libc::*;
 
-use crate::heap::{stack::approximate_stack_pointer, safepoint, thread::thread};
+use crate::heap::{stack::approximate_stack_pointer, safepoint, thread::Thread, heap::heap};
 
 unsafe extern "C" fn sigdie_handler(sig: i32, _info: *mut siginfo_t, _context: *mut c_void) {
     let mut sset = 0;
@@ -23,9 +23,25 @@ unsafe extern "C" fn segv_handler(sig: i32, info: *mut siginfo_t, context: *mut 
     if safepoint::addr_in_safepoint((*info).si_addr() as usize) {
         log::trace!(target: "gc-safepoint", "{:?} reached safepoint", std::thread::current().id());
         // basically spin-loop that waits for safepoint to be disabled
-        thread().enter_safepoint(get_sp_from_ucontext(context).cast());
+        Thread::current().enter_safepoint(get_sp_from_ucontext(context).cast());
         log::trace!(target: "gc-safepoint", "{:?} exit safepoint", std::thread::current().id());
         return;
+    } else {
+        let heap = heap();
+
+        if heap.is_in((*info).si_addr().cast()) {
+            // we got here because we tried to access heap memory that is not mapped
+            // this can happen if we try to access memory that is not allocated yet
+            // or if we try to access memory that was already freed
+            // we can't do anything about it, so we just die
+            
+            let backtrace = std::backtrace::Backtrace::force_capture();
+
+            eprintln!("FATAL: Heap Out of Bounds Access of {:p}", (*info).si_addr());
+            eprintln!("{}", backtrace);
+
+            return sigdie_handler(sig, info, context as _);
+        }
     }
 
     sigdie_handler(sig, info, context as _);

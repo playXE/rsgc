@@ -7,7 +7,7 @@ use std::{
 use atomic::Ordering;
 
 use crate::{
-    heap::thread::{thread_no_register, ThreadInfo},
+    heap::thread::{Thread},
     utils::taskqueue::{TaskQueueSetSuper, TerminatorTerminator},
 };
 
@@ -57,7 +57,7 @@ pub struct TaskTerminator {
     queue_set: *mut dyn TaskQueueSetSuper,
     offered_termination: AtomicUsize,
     blocker: Monitor<()>,
-    spin_master: AtomicPtr<ThreadInfo>,
+    spin_master: AtomicPtr<Thread>,
 }
 
 unsafe impl Send for TaskTerminator {}
@@ -100,7 +100,7 @@ impl TaskTerminator {
         unsafe { (*self.queue_set).tasks() }
     }
 
-    pub fn prepare_for_return(&self, thread: *mut ThreadInfo, mut tasks: usize) {
+    pub fn prepare_for_return(&self, thread: *mut Thread, mut tasks: usize) {
         if self.spin_master.load(Ordering::Relaxed) == thread {
             self.spin_master
                 .store(std::ptr::null_mut(), Ordering::Relaxed);
@@ -122,7 +122,7 @@ impl TaskTerminator {
             return true;
         }
 
-        let the_thread = unsafe { thread_no_register() };
+        let the_thread = Thread::current();
 
         let mut x = self.blocker.lock(false);
         self.offered_termination.fetch_add(1, Ordering::Relaxed);

@@ -1,7 +1,7 @@
 use crate::heap::taskqueue::MarkTask;
 use crate::{object::HeapObjectHeader, utils::stack::Stack, traits::Visitor};
 use crate::utils::taskqueue::*;
-use super::{heap::{Heap, heap}, thread::ThreadInfo};
+use super::{heap::{Heap, heap}, thread::Thread};
 
 /// RootsCollector
 ///
@@ -33,6 +33,7 @@ impl<'a> RootsCollector<'a> {
         let obj = self.heap.object_start(ptr as _);
 
         if !obj.is_null() {
+            assert!(self.heap.is_in(obj.cast()));
             self.try_mark(obj);
         }
     }
@@ -55,7 +56,7 @@ impl<'a> RootsCollector<'a> {
         }
     }
 
-    pub fn collect(&mut self, threads: &'a [*mut ThreadInfo]) {
+    pub fn collect(&mut self, threads: &'a [*mut Thread]) {
         unsafe {
             for thread in threads.iter().copied() {
                 self.mark_stack((*thread).stack_start(), (*thread).last_sp());

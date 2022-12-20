@@ -178,7 +178,7 @@ pub struct GarbageCollector {
     free_list_count: usize,
     extra_pages: *mut PExtra,
     threads: ThreadsInfo,
-    current_thread: thread_local::ThreadLocal<ThreadInfoRef>,
+    current_thread: thread_local::ThreadLocal<ThreadRef>,
     base_addr: usize,
     recursions: usize,
     stats: GcStats,
@@ -1138,14 +1138,14 @@ impl GarbageCollector {
         }
     }
 
-    unsafe fn current_thread(&self) -> *mut ThreadInfo {
+    unsafe fn current_thread(&self) -> *mut Thread {
         self.current_thread
             .get()
             .map(|x| x.0.get())
             .unwrap_or(std::ptr::null_mut())
     }
 
-    unsafe fn save_context(th: *mut ThreadInfo) {
+    unsafe fn save_context(th: *mut Thread) {
         (*th).stack_cur = approximate_stack_pointer() as _;
     }
 
@@ -1155,13 +1155,13 @@ impl GarbageCollector {
             panic!("Thread already registered");
         }
 
-        let th = Box::into_raw(Box::new(ThreadInfo {
+        let th = Box::into_raw(Box::new(Thread {
             thread_id: std::thread::current().id(),
             stack_bounds: StackBounds::current_thread_stack_bounds(),
             stack_cur: approximate_stack_pointer() as _,
             gc_blocking: 0,
         }));
-        let _ = self.current_thread.get_or(|| ThreadInfoRef(Cell::new(th)));
+        let _ = self.current_thread.get_or(|| ThreadRef(Cell::new(th)));
 
         self.global_lock(true);
         self.threads.threads.push(th);
@@ -1286,7 +1286,7 @@ impl<T: 'static + Allocation> ConstVal<&'static Type> for VT<T> {
     };
 }
 
-pub struct ThreadInfo {
+pub struct Thread {
     thread_id: ThreadId,
     gc_blocking: i32,
     stack_bounds: StackBounds,
@@ -1300,14 +1300,14 @@ use parking_lot::{
 
 pub struct ThreadsInfo {
     stopping_world: bool,
-    threads: Vec<*mut ThreadInfo>,
+    threads: Vec<*mut Thread>,
     global_lock: Lock,
 }
 
-pub struct ThreadInfoRef(Cell<*mut ThreadInfo>);
+pub struct ThreadRef(Cell<*mut Thread>);
 
-unsafe impl Send for ThreadInfoRef {}
-unsafe impl Sync for ThreadInfoRef {}
+unsafe impl Send for ThreadRef {}
+unsafe impl Sync for ThreadRef {}
 
 pub fn out_of_memory(errmsg: &str) {
     std::panic::always_abort();

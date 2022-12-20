@@ -5,7 +5,7 @@ Semi-conservative Mark&Sweep Garbage Collector inspired by Shenandoah for Rust w
 ## Features
 - Semi-conservative: can find GC pointers on thread stack and registers
 - Supports variable-sized objects (not Rust `dyn` objects!) like arrays and strings. 
-- Light finalizers: cannot revive objects when an object has `LIGHT_FINALIZER`` set to true.
+- Light finalizers: cannot revive objects when an object has `DESTRUCTIBLE`` set to true.
 - Finalizers: ordered finalizers that can revive objects.
 - Weak references
 - Weak maps
@@ -32,10 +32,10 @@ It depends on heuristics choosen. At the moment only `adaptive` and `compact` ar
 
 ## Concurrency
 
-RSGC is Concurrent Mark-And-Sweep. This means you need to ensure that objects are properly traced by collector when marking is running. For this `ThreadInfo::write_barrier` should be invoked right after write of field to an object:
+RSGC is Concurrent Mark-And-Sweep. This means you need to ensure that objects are properly traced by collector when marking is running. For this `Thread::write_barrier` should be invoked right after write of field to an object:
 ```rust
 
-fn foo(thread: &mut ThreadInfo, obj: Handle<Obj>, field: Handle<Obj2>) {
+fn foo(thread: &mut Thread, obj: Handle<Obj>, field: Handle<Obj2>) {
     obj.as_mut().field = field;
     thread.write_barrier(obj); // possibly push obj to mark worklist
 }
@@ -43,10 +43,10 @@ fn foo(thread: &mut ThreadInfo, obj: Handle<Obj>, field: Handle<Obj2>) {
 
 ## Safepoints
 
-Safepoints are the only way GC can synchronize all threads at some point in time to perform some operations that can't be performed concurrently with threads running. For safepoint to happen you should invoke `ThreadInfo::safepoint`:
+Safepoints are the only way GC can synchronize all threads at some point in time to perform some operations that can't be performed concurrently with threads running. For safepoint to happen you should invoke `Thread::safepoint`:
 ```rust
 
-fn some_expensive_func(thread: &mut ThreadInfo) {
+fn some_expensive_func(thread: &mut Thread) {
     thread.safepoint(); // safepoint at entry
 
     while /* some condition */ {

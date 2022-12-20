@@ -6,19 +6,19 @@ use std::{
 
 use atomic::Ordering;
 
-use crate::heap::{safepoint, thread::ThreadInfo};
+use crate::heap::{safepoint, thread::Thread};
 
 use super::monitor::Monitor;
 
 pub trait VMOperation {
-    fn doit(&mut self, threads: &[*mut ThreadInfo]);
+    fn doit(&mut self, threads: &[*mut Thread]);
 
-    fn doit_prologue(&mut self, threads: &[*mut ThreadInfo]) -> bool {
+    fn doit_prologue(&mut self, threads: &[*mut Thread]) -> bool {
         let _ = threads;
         true
     }
 
-    fn doit_epilogue(&mut self, threads: &[*mut ThreadInfo]) {
+    fn doit_epilogue(&mut self, threads: &[*mut Thread]) {
         let _ = threads;
     }
 
@@ -36,7 +36,7 @@ pub trait VMOperation {
 }
 
 impl VMOperation for () {
-    fn doit(&mut self, threads: &[*mut ThreadInfo]) {
+    fn doit(&mut self, threads: &[*mut Thread]) {
         let _ = threads;
     }
 

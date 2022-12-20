@@ -23,7 +23,7 @@
 
 use crate::{object::Handle, traits::Object};
 
-use super::thread::{ThreadInfo, thread};
+use super::thread::{Thread};
 
 pub trait WriteBarriered {
     fn write_barrier_handle(&self) -> Handle<dyn Object>;
@@ -53,7 +53,7 @@ impl<T: Object + ?Sized> WriteBarrier<T> {
     }
 
     /// Returns mutable reference to `T` and automatically inserts write barrier.
-    pub fn as_mut_fast(&mut self, thread: &mut ThreadInfo) -> &mut T 
+    pub fn as_mut_fast(&mut self, thread: &mut Thread) -> &mut T 
     where T: Sized
     {
         thread.write_barrier(self.handle);
@@ -65,11 +65,11 @@ impl<T: Object + ?Sized> WriteBarrier<T> {
     /// ## Note
     /// 
     /// Might be slower because requires TLS access, use [WriteBarrier::as_mut_fast] instead 
-    /// if you have `ThreadInfo` pointer in context.
+    /// if you have `Thread` pointer in context.
     pub fn as_mut(&mut self) -> &mut T 
     where T: Sized
     {
-        self.as_mut_fast(thread())
+        self.as_mut_fast(Thread::current())
     }
 
     pub fn as_ref(&self) -> &T where T: Sized {
