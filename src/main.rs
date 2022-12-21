@@ -1,11 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, hint::black_box};
 
 use rsgc::{
     env::read_uint_from_env,
     heap::{region::HeapArguments, thread::Thread},
-    keep_on_stack,
     object::{Allocation, Handle},
-    traits::Object,
+    traits::Object, keep_on_stack,
 };
 
 #[allow(dead_code)]
@@ -43,19 +42,20 @@ impl TreeNode {
 }
 
 fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
-    if 0 < depth {
-        let left = create_tree(thread, depth - 1);
-        let right = create_tree(thread, depth - 1);
-
+    let node = if 0 < depth {
         let node = TreeNode {
             item: 0,
-            left: Some(left),
-            right: Some(right),
+            left: None,
+            right: None,
         };
+        let mut node = thread.allocate_fixed(node);
+        thread.write_barrier(node);
+        node.as_mut().left = Some(create_tree(thread, depth - 1));
+        node.as_mut().right = Some(create_tree(thread, depth - 1));
 
-        keep_on_stack(&node);
-
-        thread.allocate_fixed(node)
+        
+        node
+        
     } else {
         let node = TreeNode {
             item: 0,
@@ -66,7 +66,9 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
         keep_on_stack(&node);
 
         thread.allocate_fixed(node)
-    }
+    };
+    thread.safepoint();
+    node
 }
 
 fn bench_parallel() {
@@ -98,31 +100,34 @@ fn bench_parallel() {
             .collect::<Vec<_>>(),
     );
     //let safe_scope = SafeScope::new(rsgc::heap::thread::thread());
-    //std::thread::scope(|scope| {
-    let mut d = min_depth;
+    rsgc::thread::scoped::scoped(|scope| {
+        let mut d = min_depth;
 
-    while d <= max_depth {
-        let depth = d;
-        let cloned = results.clone();
-        //scope.spawn(move || {
-        let thread = Thread::current();
-        let iterations = 1 << (max_depth - depth + min_depth);
-        let mut check = 0;
-        for _ in 1..=iterations {
-            let tree_node = create_tree(thread, depth as _);
-            check += tree_node.as_ref().check_tree();
+        while d <= max_depth {
+            let depth = d;
+            let cloned = results.clone();
+            scope.spawn(move || {
+                let thread = Thread::current();
+                let iterations = 1 << (max_depth - depth + min_depth);
+                let mut check = 0;
+                for _ in 1..=iterations {
+                    thread.safepoint();
+                    let tree_node = create_tree(thread, depth as _);
+                    keep_on_stack(&tree_node);
+                    check += tree_node.as_ref().check_tree();
+                    
+                    
+                }
+
+                *cloned[(depth - min_depth) / 2].lock() = format!(
+                    "{}\t trees of depth {}\t check: {}",
+                    iterations, depth, check
+                );
+            });
+
+            d += 2;
         }
-
-        *cloned[(depth - min_depth) / 2].lock() = format!(
-            "{}\t trees of depth {}\t check: {}",
-            iterations, depth, check
-        );
-        //});
-
-        d += 2;
-    }
-
-    //});
+    });
     //drop(safe_scope);
     for result in results.iter() {
         println!("{}", *result.lock());
@@ -139,11 +144,10 @@ fn bench_parallel() {
     );
 }
 
+
 fn main() {
     env_logger::init();
-    let args = HeapArguments::from_env();
-
-    rsgc::thread::main_thread(args, |_| {
+    rsgc::thread::main_thread(HeapArguments::from_env(), |_| {
         bench_parallel();
     });
 }

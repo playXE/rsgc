@@ -48,3 +48,6 @@ gc_derive = "0.4"
 [[bench]]
 name = "binarytrees"
 harness = false
+
+[profile.release]
+debug = true

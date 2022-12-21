@@ -63,7 +63,8 @@ pub fn disable() {
 }
 
 pub fn init() {
-    let _ = SAFEPOINT_PAGE.address();
+    let addr = SAFEPOINT_PAGE.address();
+    log::info!("safepoint page: {:p}", addr);
     install_signal_handlers();
 }
 
@@ -141,8 +142,8 @@ impl SafepointSynchronize {
 
     pub(crate) unsafe fn end(guard: MutexGuard<'static, Vec<*mut Thread>>) {
         heap().safepoint_synchronize_end();
-        end();
         drop(guard);
+        end();
         SAFEPOINT_STATE.store(SAFEPOINT_UNSYNCHRONIZED, Ordering::Release);
     }
 

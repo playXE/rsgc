@@ -1,6 +1,9 @@
+use std::mem::size_of;
+
 use crate::heap::taskqueue::MarkTask;
 use crate::{object::HeapObjectHeader, utils::stack::Stack, traits::Visitor};
 use crate::utils::taskqueue::*;
+use super::{align_down, align_up};
 use super::{heap::{Heap, heap}, thread::Thread};
 
 /// RootsCollector
@@ -46,7 +49,8 @@ impl<'a> RootsCollector<'a> {
         if cursor > end {
             std::mem::swap(&mut cursor, &mut end); 
         }
-
+        cursor = align_down(cursor as _, size_of::<usize>()) as *mut *const u8;
+        end = align_up(end as _, size_of::<usize>()) as *mut *const u8;
         while cursor < end {
             unsafe {
                 let potential_object = cursor.read();
@@ -60,6 +64,8 @@ impl<'a> RootsCollector<'a> {
         unsafe {
             for thread in threads.iter().copied() {
                 self.mark_stack((*thread).stack_start(), (*thread).last_sp());
+                let (regs, size) = (*thread).get_registers();
+                self.mark_stack(regs as _, regs.add(size) as _);
             }
 
             heap().walk_global_roots(self);

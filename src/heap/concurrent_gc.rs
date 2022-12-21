@@ -127,7 +127,7 @@ impl ConcurrentGC {
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
                 drop(phase);
-
+                
                 log::debug!(target: "gc", "Concurrent GC end in {} msecs ({} msecs sweep), Region: {} live, {} freed", start.elapsed().as_millis(), sweep_end.as_millis(), sweep.live.load(atomic::Ordering::Relaxed), sweep.freed.load(atomic::Ordering::Relaxed));
             }
 

@@ -7,6 +7,7 @@ pub mod number_seq;
 pub mod ptr_queue;
 pub mod deque;
 pub mod sloppy_memset;
+pub mod machine_context;
 
 pub const fn nth_bit(n: usize) -> usize {
     if n >= size_of::<usize>() * 8 {
