@@ -5,7 +5,7 @@
 //! # Usage 
 //! 
 //! Write barrier should be inserted right before GC ref gets written to an object:
-//! ```mustfail,rust
+//! ```c++
 //! 
 //! fn set_x(obj: Handle<Obj>, x: Handle<X>) {
 //!    thread().write_barrier(obj);

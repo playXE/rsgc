@@ -295,6 +295,17 @@ pub struct Mutex<T: ?Sized> {
 }
 
 impl<T: ?Sized> Mutex<T> {
+
+    pub unsafe fn unsafe_get(&self) -> &T {
+        &*self.data.get()
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        unsafe {
+            &mut *self.data.get()
+        }
+    }
+
     #[inline]
     pub const fn new(val: T) -> Mutex<T>
     where
@@ -611,6 +622,10 @@ impl Condvar {
             unsafe { MutexGuard::mutex(mutex_guard).raw() },
             Some(timeout),
         )
+    }
+
+    pub fn wait_raw(&self, safepoint: bool, mutex: &RawMutex) {
+        self.wait_until_internal(safepoint, mutex, None);
     }
 
     // This is a non-generic function to reduce the monomorphization cost of

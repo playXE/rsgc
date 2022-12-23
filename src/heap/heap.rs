@@ -1,14 +1,19 @@
 use std::{
     mem::{size_of, MaybeUninit},
     ptr::null_mut,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        Arc,
+    },
     time::Instant,
 };
 
 use crate::{
     formatted_size,
+    heap::{root_processor::RootTask, safepoint::SafepointSynchronize},
     object::HeapObjectHeader,
     sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
+    thread::threads,
     traits::{Visitor, WeakProcessor},
 };
 
@@ -20,13 +25,14 @@ use super::{
     controller::ControlThread,
     free_set::RegionFreeSet,
     heuristics::{adaptive::AdaptiveHeuristics, compact::CompactHeuristics, Heuristics},
-    mark_bitmap::MarkBitmap,
+    mark::SlotVisitor,
     marking_context::MarkingContext,
     memory_region::MemoryRegion,
     region::{HeapArguments, HeapOptions, HeapRegion},
+    root_processor::{Root, RootSet, SimpleRoot},
     safepoint,
     shared_vars::{SharedEnumFlag, SharedFlag},
-    thread::{Thread, SafeScope},
+    thread::{SafeScope, Thread},
     virtual_memory::{self, page_size, PlatformVirtualMemory, VirtualMemory, VirtualMemoryImpl},
     AllocRequest, GCHeuristic,
 };
@@ -59,7 +65,7 @@ pub struct Heap {
     object_start_bitmap: HeapBitmap<16>,
     heuristics: Box<dyn Heuristics>,
     weak_refs: Vec<*mut HeapObjectHeader>,
-    global_roots: Vec<Box<dyn GlobalRoot>>,
+    root_set: RootSet,
     scoped_pool: scoped_thread_pool::Pool,
     cancelled_gc: SharedEnumFlag,
 }
@@ -99,6 +105,10 @@ impl Heap {
         } else {
             self.is_concurrent_mark_in_progress.unset();
         }
+    }
+
+    pub(crate) fn root_set(&self) -> &RootSet {
+        &self.root_set
     }
 
     pub fn new(mut args: HeapArguments) -> &'static mut Self {
@@ -170,7 +180,7 @@ impl Heap {
             controller_thread: None,
             progress_last_gc: SharedFlag::new(),
             weak_refs: vec![],
-            global_roots: vec![],
+            root_set: RootSet::new(),
             scoped_pool: scoped_thread_pool::Pool::new(opts.parallel_gc_threads),
             marking_context: mark_ctx,
             cancelled_gc: SharedEnumFlag::new(),
@@ -187,6 +197,8 @@ impl Heap {
             }
         }
 
+        
+
         this.free_set.set_heap(ptr);
         this.free_set.rebuild();
 
@@ -195,6 +207,12 @@ impl Heap {
 
             heap().controller_thread = Some(ControlThread::new());
             INIT.store(true, Ordering::SeqCst);
+        }
+        for i in 0..this.marking_context.mark_queues().nworkers() {
+            let visitor = this.marking_context.mark_queues().visitor(i);
+            unsafe {
+                (*visitor).set_mark_ctx(this.marking_context as *const MarkingContext);
+            }
         }
         this
     }
@@ -334,9 +352,9 @@ impl Heap {
         self.regions[index]
     }
 
-    pub fn add_global_root(&mut self, root: Box<dyn GlobalRoot>) {
+    pub fn add_global_root(&mut self, root: impl Root + 'static) {
         self.lock.lock();
-        self.global_roots.push(root);
+        self.root_set.add_root(Arc::new(root));
         unsafe {
             self.lock.unlock();
         }
@@ -350,8 +368,14 @@ impl Heap {
         }
     }
 
-    pub unsafe fn walk_global_roots(&self, vis: &mut dyn Visitor) {
-        self.global_roots.iter().for_each(|root| root.walk(vis));
+    pub(crate) fn for_each_visitor(&self, mut cb: impl FnMut(*mut dyn Visitor)) {
+        self.marking_context()
+            .mark_queues()
+            .visitors()
+            .iter()
+            .for_each(|vis| cb(*vis));
+
+        cb(heap().marking_context);
     }
 
     pub unsafe fn process_weak_refs(&mut self) {
@@ -737,6 +761,43 @@ impl Heap {
     pub fn safepoint_synchronize_end(&self) {
         SuspendibleThreadSet::desynchronize();
     }
+
+    pub fn add_core_root_set(&mut self) {
+        self.add_global_root(SimpleRoot::new(
+            "Conservative roots",
+            "CS",
+            |processor| unsafe {
+                assert!(
+                    SafepointSynchronize::is_at_safepoint(),
+                    "must be at safepoint for scanning thread stacks and registers"
+                );
+                let threads = threads();
+
+                for thread in threads.threads.unsafe_get() {
+                    let thread = &**thread;
+                    processor.add_task(
+                        move |processor| {
+                            let mut stack_start = thread.stack_start();
+                            let mut stack_end = thread.last_sp();
+
+                            if stack_start > stack_end {
+                                // stack grows in different direction
+                                std::mem::swap(&mut stack_start, &mut stack_end);
+                            }
+
+                            processor.visitor().visit_conservative(
+                                stack_start.cast(),
+                                (stack_end as usize - stack_start as usize) / size_of::<usize>(),
+                            );
+                            let (regs, size) = (*thread).get_registers();
+                            processor.visitor().visit_conservative(regs.cast(), size);
+                        },
+                        false,
+                    );
+                }
+            },
+        ));
+    }
 }
 
 struct HeapRef(&'static mut Heap);
@@ -771,9 +832,7 @@ impl Drop for Heap {
         self.cancel_gc();
         self.controller_thread.as_mut().unwrap().stop();
 
-        let _ = unsafe {
-            Box::from_raw(self.marking_context)
-        };
+        let _ = unsafe { Box::from_raw(self.marking_context) };
     }
 }
 

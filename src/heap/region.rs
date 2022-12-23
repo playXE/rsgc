@@ -146,6 +146,8 @@ pub struct HeapArguments {
     /// Larger values makes the pacing more aggressive. Lower values
     /// risk GC cycles finish with less memory than were available at the beginning of it.
     pub pacing_surcharge: f64,
+    
+    pub parallel_root_mark_tasks: bool,
 }
 
 impl HeapArguments {
@@ -329,6 +331,11 @@ impl HeapArguments {
             None => (),
         }
 
+        match read_uint_from_env("GC_PARALLEL_ROOT_MARKS") {
+            Some(x) => this.parallel_root_mark_tasks = x != 0,
+            None => (),
+        }
+
         this.heuristics = match std::env::var("GC_HEURISTICS") {
             Ok(x) => match x.to_lowercase().as_str() {
                 "adaptive" => GCHeuristic::Adaptive,
@@ -392,6 +399,7 @@ impl HeapArguments {
 impl Default for HeapArguments {
     fn default() -> Self {
         Self {
+            parallel_root_mark_tasks: true,
             always_full: false,
             min_region_size: virtual_memory::page_size(),
             max_region_size: 32 * 1024 * 1024,
@@ -512,6 +520,8 @@ pub struct HeapOptions {
     /// Larger values makes the pacing more aggressive. Lower values
     /// risk GC cycles finish with less memory than were available at the beginning of it.
     pub pacing_surcharge: f64,
+
+    pub parallel_root_mark_tasks: bool,
 }
 
 impl HeapOptions {
@@ -790,6 +800,7 @@ impl HeapRegion {
         opts.pacing_idle_slack = args.pacing_idle_slack;
         opts.pacing_max_delay = args.pacing_max_delay;
         opts.pacing_surcharge = args.pacing_surcharge;
+        opts.parallel_root_mark_tasks = args.parallel_root_mark_tasks;
 
         let min_region_size = if args.min_region_size < Self::MIN_REGION_SIZE {
             Self::MIN_REGION_SIZE

@@ -52,7 +52,7 @@ impl DegeneratedGC {
             let mark = ConcMark::new();
             mark.cancel(&threads);
             let mark = STWMark::new();
-            mark.mark(&threads);
+            mark.mark();
             self.heap.process_weak_refs();
             self.degen_point = DegenPoint::ConcurrentMark;
             self.heap.set_concurrent_mark_in_progress(false);
@@ -65,7 +65,7 @@ impl DegeneratedGC {
             if self.heap.is_concurrent_mark_in_progress() {
                 let phase = PausePhase::new("Degenerate GC: Finish Marking");
                 let mark = ConcMark::new();
-                mark.collect_roots(&threads); // remark roots and flush SATB buffers
+                mark.collect_roots(); // remark roots and flush SATB buffers
                 mark.finish(&threads);
 
                 self.heap.set_concurrent_mark_in_progress(false);

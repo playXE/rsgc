@@ -21,6 +21,8 @@ pub trait Object {
 pub trait Visitor {
     fn visit(&mut self, object: *const u8);
     fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize);
+
+    fn visit_count(&self) -> usize;
 }
 
 pub trait WeakProcessor {

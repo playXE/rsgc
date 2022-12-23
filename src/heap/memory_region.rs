@@ -21,6 +21,10 @@ impl MemoryRegion {
         self.size
     }
 
+    pub fn word_size(&self) -> usize {
+        self.size / core::mem::size_of::<usize>()
+    }
+
     pub fn set_size(&mut self, size: usize) {
         self.size = size;
     }

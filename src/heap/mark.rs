@@ -1,7 +1,9 @@
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::distributions::{Distribution, Uniform};
 use rand::thread_rng;
+use std::ptr::null;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -11,7 +13,6 @@ use crate::traits::Visitor;
 
 use super::heap::{heap, Heap};
 use super::marking_context::MarkingContext;
-use super::root_processor::RootsCollector;
 use super::thread::Thread;
 
 pub struct Terminator {
@@ -79,12 +80,8 @@ type Address = usize;
 
 pub struct MarkingTask<'a> {
     task_id: usize,
-    local: Segment,
-    /*worker: &'a Worker<Address>,
-    injector: &'a Injector<Address>,
-    stealers: &'a [Stealer<Address>],*/
+    visitor: &'a mut SlotVisitor,
     terminator: &'a Terminator,
-    marked: usize,
     pub(crate) heap: &'static Heap,
     pub(crate) mark_ctx: &'static MarkingContext,
 }
@@ -98,107 +95,11 @@ impl<'a> MarkingTask<'a> {
     ) -> MarkingTask<'a> {
         MarkingTask {
             task_id,
-            local: Segment::new(),
+            visitor: unsafe { &mut *(mark_ctx.mark_queues().visitor(task_id)) },
+
             terminator,
-            marked: 0,
             heap,
             mark_ctx,
-        }
-    }
-
-    pub fn pop(&mut self) -> Option<MarkTask> {
-        self.pop_local()
-            .or_else(|| self.pop_worker())
-            .or_else(|| self.pop_global())
-            .or_else(|| self.steal())
-    }
-
-    fn pop_local(&mut self) -> Option<MarkTask> {
-        if self.local.is_empty() {
-            return None;
-        }
-
-        let obj = self.local.pop().expect("should be non-empty");
-        Some(obj)
-    }
-
-    fn pop_worker(&mut self) -> Option<MarkTask> {
-        self.mark_ctx.mark_queues().worker(self.task_id).pop()
-    }
-
-    fn worker(&self) -> &Worker<MarkTask> {
-        self.mark_ctx.mark_queues().worker(self.task_id)
-    }
-
-    fn stealers(&self) -> &[Stealer<MarkTask>] {
-        self.mark_ctx.mark_queues().stealers()
-    }
-
-    fn injector(&self) -> &Injector<MarkTask> {
-        self.mark_ctx.mark_queues().injector()
-    }
-
-    fn pop_global(&mut self) -> Option<MarkTask> {
-        loop {
-            let result = self
-                .mark_ctx
-                .mark_queues()
-                .injector()
-                .steal_batch_and_pop(self.worker());
-
-            match result {
-                Steal::Empty => break,
-                Steal::Success(value) => return Some(value),
-                Steal::Retry => continue,
-            }
-        }
-
-        None
-    }
-
-    fn steal(&self) -> Option<MarkTask> {
-        if self.stealers().len() == 1 {
-            return None;
-        }
-
-        let mut rng = thread_rng();
-        let range = Uniform::new(0, self.stealers().len());
-
-        for _ in 0..2 * self.stealers().len() {
-            let mut stealer_id = self.task_id;
-
-            while stealer_id == self.task_id {
-                stealer_id = range.sample(&mut rng);
-            }
-
-            let stealer = &self.stealers()[stealer_id];
-
-            loop {
-                match stealer.steal_batch_and_pop(self.worker()) {
-                    Steal::Empty => break,
-                    Steal::Success(address) => return Some(address),
-                    Steal::Retry => continue,
-                }
-            }
-        }
-
-        None
-    }
-
-    fn defensive_push(&mut self) {
-        self.marked += 1;
-
-        if self.marked > 256 {
-            if self.local.len() > 4 {
-                let target_len = self.local.len() / 2;
-
-                while self.local.len() > target_len {
-                    let val = self.local.pop().unwrap();
-                    self.injector().push(val);
-                }
-            }
-
-            self.marked = 0;
         }
     }
 
@@ -211,7 +112,7 @@ impl<'a> MarkingTask<'a> {
             }
             let mut work = 0;
             for _ in 0..stride {
-                if let Some(task) = self.pop() {
+                if let Some(task) = self.visitor.pop() {
                     unsafe {
                         self.do_task(task);
                     }
@@ -236,7 +137,7 @@ impl<'a> MarkingTask<'a> {
         let obj = task.obj();
         if task.is_not_chunked() {
             if !(*obj).vtable().varsize.is_varsize {
-                (*obj).visit(self);
+                (*obj).visit(self.visitor);
             } else if (*obj).vtable().varsize.is_varsize {
                 self.do_chunked_array_start(obj);
             } else {
@@ -247,47 +148,14 @@ impl<'a> MarkingTask<'a> {
         }
     }
 
-    pub fn push(&mut self, obj: MarkTask) {
-        debug_assert!(self.heap.is_in(obj.obj() as _));
-        if self.local.has_capacity() {
-            self.local.push(obj);
-            self.defensive_push();
-        } else {
-            self.worker().push(obj);
-        }
-    }
-
-    pub unsafe fn try_mark(&mut self, obj: *mut u8) {
-
-        let obj = obj.cast::<HeapObjectHeader>().sub(1);
-        if self.mark_ctx.mark(obj) {
-            if (*obj).should_trace() {
-                self.push(MarkTask::new(obj, false, false));
-            }
-        }
-    }
-
-    pub unsafe fn try_mark_conservatively(&mut self, obj: *const u8) {
-        if !self.heap.is_in(obj as _) {
-            return;
-        }
-
-        let object = self.heap.object_start(obj as _);
-        if object.is_null() {
-            return;
-        }
-
-        self.try_mark(object.add(1) as *mut u8);
-    }
-
     unsafe fn do_chunked_array_start(&mut self, obj: *mut HeapObjectHeader) {
         let len = (*obj).array_length();
-        ((*obj).vtable().trace)(obj.add(1).cast(), self);
+        ((*obj).vtable().trace)(obj.add(1).cast(), self.visitor);
         if let Some(iter) = (*obj).vtable().varsize.iterate_range {
             if len <= 2048 * 2 {
                 // a few slices only, process directly
 
-                iter(obj.add(1).cast(), 0, len, self);
+                iter(obj.add(1).cast(), 0, len, self.visitor);
             } else {
                 let mut bits = log2i_graceful(len);
 
@@ -313,7 +181,8 @@ impl<'a> MarkingTask<'a> {
 
                     chunk = 2;
                     last_idx = 1 << pow;
-                    self.push(MarkTask::new2(obj, true, false, chunk as _, pow as _));
+                    self.visitor
+                        .push(MarkTask::new2(obj, true, false, chunk as _, pow as _));
                 }
 
                 // Split out tasks, as suggested in ShenandoahMarkTask docs. Record the last
@@ -326,7 +195,13 @@ impl<'a> MarkingTask<'a> {
                     let left_chunk_end = left_chunk * (1 << pow);
 
                     if left_chunk_end < len as isize {
-                        self.push(MarkTask::new2(obj, true, false, left_chunk as _, pow as _));
+                        self.visitor.push(MarkTask::new2(
+                            obj,
+                            true,
+                            false,
+                            left_chunk as _,
+                            pow as _,
+                        ));
                         chunk = right_chunk;
                         last_idx = left_chunk_end;
                     } else {
@@ -336,7 +211,7 @@ impl<'a> MarkingTask<'a> {
                 // Process the irregular tail, if present
                 let from = last_idx;
                 if from < len as isize {
-                    iter(obj.add(1).cast(), from as _, len, self);
+                    iter(obj.add(1).cast(), from as _, len, self.visitor);
                 }
             }
         }
@@ -354,7 +229,7 @@ impl<'a> MarkingTask<'a> {
             pow -= 1;
             chunk *= 2;
 
-            self.push(MarkTask::new2(
+            self.visitor.push(MarkTask::new2(
                 obj,
                 true,
                 false,
@@ -368,23 +243,7 @@ impl<'a> MarkingTask<'a> {
         let to = chunk * chunk_size;
 
         if let Some(iter) = varsize.iterate_range {
-            iter(obj.add(1).cast(), from as _, to as _, self);
-        }
-    }
-}
-
-impl<'a> Visitor for MarkingTask<'a> {
-    fn visit(&mut self, object: *const u8) {
-        unsafe {
-            self.try_mark(object as _);
-        }
-    }
-
-    fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize) {
-        unsafe {
-            for i in 0..len {
-                self.try_mark_conservatively(ptrs.add(i).read());
-            }
+            iter(obj.add(1).cast(), from as _, to as _, self.visitor);
         }
     }
 }
@@ -436,46 +295,40 @@ impl Segment {
 }
 
 pub struct MarkQueueSet {
-    workers: Vec<Worker<MarkTask>>,
-    stealers: Vec<Stealer<MarkTask>>,
-    injector: Injector<MarkTask>,
+    visitors: Vec<*mut SlotVisitor>,
+    injector: Arc<Injector<MarkTask>>,
 }
 
 impl MarkQueueSet {
     pub fn new(nworkers: usize) -> MarkQueueSet {
-        let mut workers = Vec::with_capacity(nworkers);
-        let mut stealers = Vec::with_capacity(nworkers);
+        let injector = Arc::new(Injector::new());
 
-        let injector = Injector::new();
+        let visitors = (0..nworkers)
+            .map(|i| {
+                let worker = Worker::new_lifo();
+                let stealer = worker.stealer();
+                Box::into_raw(Box::new(SlotVisitor::new(
+                    i,
+                    worker,
+                    stealer,
+                    injector.clone(),
+                )))
+            })
+            .collect::<Vec<_>>();
 
-        for _ in 0..nworkers {
-            let w = Worker::new_lifo();
-            let s = w.stealer();
-            workers.push(w);
-            stealers.push(s);
-        }
-
-        MarkQueueSet {
-            workers,
-            stealers,
-            injector,
-        }
+        Self { injector, visitors }
     }
 
-    pub fn worker(&self, id: usize) -> &Worker<MarkTask> {
-        &self.workers[id]
+    pub fn visitors(&self) -> &[*mut SlotVisitor] {
+        &self.visitors
     }
 
-    pub fn stealer(&self, id: usize) -> &Stealer<MarkTask> {
-        &self.stealers[id]
-    }
-
-    pub fn stealers(&self) -> &[Stealer<MarkTask>] {
-        &self.stealers
+    pub fn visitor(&self, id: usize) -> *mut SlotVisitor {
+        self.visitors[id]
     }
 
     pub fn nworkers(&self) -> usize {
-        self.workers.len()
+        self.visitors.len()
     }
 
     pub fn injector(&self) -> &Injector<MarkTask> {
@@ -490,18 +343,11 @@ impl STWMark {
         Self {}
     }
 
-    pub fn mark(&self, threads: &[*mut Thread]) {
+    pub fn mark(&self) {
         let heap = heap();
-        let mut mark_stack = {
-            let mut root_collector = RootsCollector::new(heap);
-            root_collector.collect(threads);
-            root_collector.get_mark_stack()
-        };
 
-        let injector = heap.marking_context().mark_queues().injector();
-        while let Some(obj) = mark_stack.pop() {
-            injector.push(MarkTask::new(obj, false, false));
-        }
+        // push roots
+        heap.root_set().process();
 
         let mc = heap.marking_context();
 
@@ -729,66 +575,260 @@ if #[cfg(target_pointer_width="64")] {
 
         } else {
             /// MarkTask
-    ///
-    /// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
-    /// The design goal is to make the regular obj ops very fast, because that would be the prevailing
-    /// case. On the other hand, it should not block parallel array processing from efficiently dividing
-    /// the array work.
-    ///
-    /// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
-    /// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
-    /// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
-    /// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
-    /// all possible arrays.
-    ///
-    ///    |xx-------obj---------|-pow-|--chunk---|
-    ///    0                    49     54        64
-    ///
-    /// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
-    ///
-    /// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
-    /// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
-    /// and "weak". This aligns with their frequent values: strong/counted-live references.
-    ///
-    /// This encoding gives a few interesting benefits:
-    ///
-    /// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
-    ///
-    ///    |---------obj---------|00000|0000000000| /// no chunk data
-    ///
-    ///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
-    ///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
-    ///
-    /// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
-    /// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
-    ///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
-    ///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
-    ///
-    ///    Observe that the union of these two intervals is:
-    ///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
-    ///
-    ///    ...which is the original interval:
-    ///      [ (C-1)*2^P; C*2^P )
-    ///
-    /// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
-    ///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
-    ///
-    /// Encoding limitations caused by current bitscales mean:
-    ///    10 bits for chunk: max 1024 blocks per array
-    ///     5 bits for power: max 2^32 array
-    ///    49 bits for   obj: max 512 TB of addressable space
-    ///
-    /// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
-    /// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
-    /// In future, these might be rebalanced to favor one degree of freedom against another. For example,
-    /// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
-    /// some bits back if chunks are counted in ObjArrayMarkingStride units.
-    ///
-    /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
-    /// bits from the native pointer. It is useful to debug the optimized version.
-    ///
+            ///
+            /// Encodes both regular oops, and the array oops plus chunking data for parallel array processing.
+            /// The design goal is to make the regular obj ops very fast, because that would be the prevailing
+            /// case. On the other hand, it should not block parallel array processing from efficiently dividing
+            /// the array work.
+            ///
+            /// The idea is to steal the bits from the 64-bit obj to encode array data, if needed. For the
+            /// proper divide-and-conquer strategies, we want to encode the "blocking" data. It turns out, the
+            /// most efficient way to do this is to encode the array block as (chunk * 2^pow), where it is assumed
+            /// that the block has the size of 2^pow. This requires for pow to have only 5 bits (2^32) to encode
+            /// all possible arrays.
+            ///
+            ///    |xx-------obj---------|-pow-|--chunk---|
+            ///    0                    49     54        64
+            ///
+            /// By definition, chunk == 0 means "no chunk", i.e. chunking starts from 1.
+            ///
+            /// Lower bits of obj are reserved to handle "skip_live" and "strong" properties. Since this encoding
+            /// stores uncompressed oops, those bits are always available. These bits default to zero for "skip_live"
+            /// and "weak". This aligns with their frequent values: strong/counted-live references.
+            ///
+            /// This encoding gives a few interesting benefits:
+            ///
+            /// a) Encoding/decoding regular oops is very simple, because the upper bits are zero in that task:
+            ///
+            ///    |---------obj---------|00000|0000000000| /// no chunk data
+            ///
+            ///    This helps the most ubiquitous path. The initialization amounts to putting the obj into the word
+            ///    with zero padding. Testing for "chunkedness" is testing for zero with chunk mask.
+            ///
+            /// b) Splitting tasks for divide-and-conquer is possible. Suppose we have chunk <C, P> that covers
+            /// interval [ (C-1)*2^P; C*2^P ). We can then split it into two chunks:
+            ///      <2*C - 1, P-1>, that covers interval [ (2*C - 2)*2^(P-1); (2*C - 1)*2^(P-1) )
+            ///      <2*C, P-1>,     that covers interval [ (2*C - 1)*2^(P-1);       2*C*2^(P-1) )
+            ///
+            ///    Observe that the union of these two intervals is:
+            ///      [ (2*C - 2)*2^(P-1); 2*C*2^(P-1) )
+            ///
+            ///    ...which is the original interval:
+            ///      [ (C-1)*2^P; C*2^P )
+            ///
+            /// c) The divide-and-conquer strategy could even start with chunk <1, round-log2-len(arr)>, and split
+            ///    down in the parallel threads, which alleviates the upfront (serial) splitting costs.
+            ///
+            /// Encoding limitations caused by current bitscales mean:
+            ///    10 bits for chunk: max 1024 blocks per array
+            ///     5 bits for power: max 2^32 array
+            ///    49 bits for   obj: max 512 TB of addressable space
+            ///
+            /// Stealing bits from obj trims down the addressable space. Stealing too few bits for chunk ID limits
+            /// potential parallelism. Stealing too few bits for pow limits the maximum array size that can be handled.
+            /// In future, these might be rebalanced to favor one degree of freedom against another. For example,
+            /// if/when Arrays 2.0 bring 2^64-sized arrays, we might need to steal another bit for power. We could regain
+            /// some bits back if chunks are counted in ObjArrayMarkingStride units.
+            ///
+            /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
+            /// bits from the native pointer. It is useful to debug the optimized version.
+            ///
             pub struct MarkTask {
 
             }
         }
+}
+
+pub struct GlobalMark {
+    visitors: Vec<Arc<SlotVisitor>>,
+}
+
+pub struct SlotVisitor {
+    task_id: usize,
+    heap: *mut Heap,
+    mark_ctx: *const MarkingContext,
+    local: Segment,
+    marked: usize,
+    visit_count: usize,
+    worker: Worker<MarkTask>,
+    stealer: Stealer<MarkTask>,
+    injector: Arc<Injector<MarkTask>>,
+}
+
+impl SlotVisitor {
+    pub fn set_mark_ctx(&mut self, mark_ctx: *const MarkingContext) {
+        self.mark_ctx = mark_ctx;
+        self.heap = heap();
+    }
+
+    pub fn new(
+        task_id: usize,
+        worker: Worker<MarkTask>,
+        stealer: Stealer<MarkTask>,
+        injector: Arc<Injector<MarkTask>>,
+    ) -> Self {
+        Self {
+            task_id,
+            heap: heap(),
+            mark_ctx: null(),
+            visit_count: 0,
+            worker,
+            stealer,
+            injector,
+            local: Segment::new(),
+            marked: 0,
+        }
+    }
+
+    pub fn visit_count(&self) -> usize {
+        self.visit_count
+    }
+
+    pub fn mark_ctx(&self) -> &MarkingContext {
+        unsafe { &*self.mark_ctx }
+    }
+
+    pub fn pop(&mut self) -> Option<MarkTask> {
+        self.pop_local()
+            .or_else(|| self.pop_worker())
+            .or_else(|| self.pop_global())
+            .or_else(|| self.steal())
+    }
+
+    fn pop_global(&mut self) -> Option<MarkTask> {
+        loop {
+            let result = self
+                .mark_ctx()
+                .mark_queues()
+                .injector()
+                .steal_batch_and_pop(self.worker());
+
+            match result {
+                Steal::Empty => break,
+                Steal::Success(value) => return Some(value),
+                Steal::Retry => continue,
+            }
+        }
+
+        None
+    }
+
+    fn steal(&self) -> Option<MarkTask> {
+        if self.mark_ctx().mark_queues().nworkers() == 1 {
+            return None;
+        }
+
+        let mut rng = thread_rng();
+        let range = Uniform::new(0, self.mark_ctx().mark_queues().nworkers());
+
+        for _ in 0..2 * self.mark_ctx().mark_queues().nworkers() {
+            let mut stealer_id = self.task_id;
+
+            while stealer_id == self.task_id {
+                stealer_id = range.sample(&mut rng);
+            }
+
+            let stealer = unsafe { &(&*self.mark_ctx().mark_queues().visitor(stealer_id)).stealer };
+
+            loop {
+                match stealer.steal_batch_and_pop(self.worker()) {
+                    Steal::Empty => break,
+                    Steal::Success(address) => return Some(address),
+                    Steal::Retry => continue,
+                }
+            }
+        }
+
+        None
+    }
+
+    fn pop_local(&mut self) -> Option<MarkTask> {
+        if self.local.is_empty() {
+            return None;
+        }
+
+        let obj = self.local.pop().expect("should be non-empty");
+        Some(obj)
+    }
+
+    fn pop_worker(&mut self) -> Option<MarkTask> {
+        self.worker.pop()
+    }
+
+    fn worker(&self) -> &Worker<MarkTask> {
+        &self.worker
+    }
+
+    fn injector(&self) -> &Injector<MarkTask> {
+        &self.injector
+    }
+
+    fn defensive_push(&mut self) {
+        self.marked += 1;
+
+        if self.marked > 256 {
+            if self.local.len() > 4 {
+                let target_len = self.local.len() / 2;
+
+                while self.local.len() > target_len {
+                    let val = self.local.pop().unwrap();
+                    self.injector().push(val);
+                }
+            }
+
+            self.marked = 0;
+        }
+    }
+
+    pub fn push(&mut self, obj: MarkTask) {
+        unsafe {
+            debug_assert!((*self.heap).is_in(obj.obj() as _));
+        }
+        self.visit_count += 1;
+        if self.local.has_capacity() {
+            self.local.push(obj);
+            self.defensive_push();
+        } else {
+            self.worker().push(obj);
+        }
+    }
+
+    unsafe fn try_conservative(&mut self, obj: *const u8) {
+        if !(*self.heap).is_in(obj as _) {
+            return;
+        }
+
+        let object = (*self.heap).object_start(obj as _);
+        if object.is_null() {
+            return;
+        }
+
+        self.visit(object.add(1).cast());
+    }
+}
+
+impl Visitor for SlotVisitor {
+    fn visit(&mut self, obj: *const u8) {
+        unsafe {
+            let obj = obj.cast::<HeapObjectHeader>().sub(1);
+            if self.mark_ctx().mark(obj) {
+                if (*obj).should_trace() {
+                    self.push(MarkTask::new(obj as _, false, false));
+                }
+            }
+        }
+    }
+
+    fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize) {
+        unsafe {
+            for i in 0..len {
+                let ptr = ptrs.add(i).read();
+                self.try_conservative(ptr);
+            }
+        }
+    }
+
+    fn visit_count(&self) -> usize {
+        self.visit_count
+    }
 }

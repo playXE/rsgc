@@ -48,6 +48,7 @@ unsafe extern "C" fn segv_handler(sig: i32, info: *mut siginfo_t, context: *mut 
                 "FATAL: Heap Out of Bounds Access of {:p}",
                 (*info).si_addr()
             );
+            eprintln!("Probably tried to access uncommited region or it is a bug in GC: report it to https://github.com/playxe/rsgc");
             eprintln!("{}", backtrace);
 
             return sigdie_handler(sig, info, context as _);

@@ -15,7 +15,6 @@ use super::{
     card_table::{age_card_visitor, CardTable},
     heap::{heap, Heap, HeapRegionClosure},
     mark::{MarkTask, MarkingTask, Terminator},
-    root_processor::RootsCollector,
     safepoint::SafepointSynchronize,
     sweeper::Sweep,
     thread::{threads, Thread},
@@ -52,22 +51,20 @@ impl ConcurrentGC {
         unsafe {
             let start = std::time::Instant::now();
             // Phase 1: Mark
-
+            
             let threads = SafepointSynchronize::begin();
             log::debug!(target: "gc-safepoint", "stopped the world ({} thread(s)) in {} ms", threads.len(), start.elapsed().as_millis());
             let mark = ConcMark::new();
 
             {
                 let phase = PausePhase::new("Init Mark");
-                // Sets all mark bits to zero
                 self.heap.prepare_gc();
-
                 for thread in threads.iter().copied() {
                     (*thread).tlab.retire((*thread).id);
                     (*thread).toggle_write_barrier(true);
                 }
                 // mark roots in STW
-                mark.collect_roots(&threads);
+                mark.collect_roots();
                 self.heap.set_concurrent_mark_in_progress(true);
                 SafepointSynchronize::end(threads);
                 drop(phase);
@@ -90,7 +87,7 @@ impl ConcurrentGC {
                     (*thread).tlab.retire((*thread).id);
                 }
                 self.heap.set_concurrent_mark_in_progress(false);
-                mark.collect_roots(&threads); // remark roots
+                mark.collect_roots(); // remark roots
                 mark.finish(&threads); // drain remaining objects and SATB queues
                 drop(phase);
                 log::debug!(target: "gc", "Concurrent mark end in {} msecs", start.elapsed().as_millis());
@@ -127,7 +124,7 @@ impl ConcurrentGC {
                 self.heap.free_set_mut().rebuild();
                 self.heap.lock.unlock();
                 drop(phase);
-                
+
                 log::debug!(target: "gc", "Concurrent GC end in {} msecs ({} msecs sweep), Region: {} live, {} freed", start.elapsed().as_millis(), sweep_end.as_millis(), sweep.live.load(atomic::Ordering::Relaxed), sweep.freed.load(atomic::Ordering::Relaxed));
             }
 
@@ -170,19 +167,9 @@ impl ConcMark {
         }
     }
 
-    pub fn collect_roots(&self, threads: &[*mut Thread]) {
+    pub fn collect_roots(&self) {
         let heap = heap();
-        let mut mark_stack = {
-            let mut root_collector = RootsCollector::new(heap);
-            root_collector.collect(threads);
-            root_collector.get_mark_stack()
-        };
-
-        let injector = heap.marking_context().mark_queues().injector();
-        while let Some(obj) = mark_stack.pop() {
-            assert!(heap.is_in(obj.cast()), "non-heap pointer: {:p}", obj);
-            injector.push(MarkTask::new(obj, false, false));
-        }
+        heap.root_set().process();
     }
 
     pub fn scan_gray_objects(&self, paused: bool, minimum_age: u8) -> bool {

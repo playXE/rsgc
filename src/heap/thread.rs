@@ -697,15 +697,18 @@ pub mod scoped {
         }
     }
 
+    /// GC-aware [std::thread::scope].
     pub fn scoped(cb: impl FnOnce(&mut Scope)) {
         let scope = std::thread::scope(|scope| {
             let mut scope = Scope { scope };
 
             cb(&mut scope);
+            // enter safepoint here since scoepd threads might not be finished there
+            // and when `scope` is dropped, the threads are joined and our thread waits
+            // for them to join
             let safe_scope = SafeScope::new(super::Thread::current());
             safe_scope
         });
         drop(scope);
-
     }
 }

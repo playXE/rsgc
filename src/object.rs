@@ -610,6 +610,7 @@ impl<T: Object + ?Sized> AtomicHandle<T> {
     pub fn store_release(&self, val: Option<Handle<T>>) {
         self.store(val, atomic::Ordering::Release);
     }
+
 }
 
 impl<T: Object + ?Sized> Clone for AtomicHandle<T> {

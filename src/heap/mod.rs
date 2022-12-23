@@ -6,37 +6,37 @@ use crate::utils::sloppy_memset;
 
 use self::heap::heap;
 
-pub mod heap;
-pub mod thread;
-pub mod safepoint;
-pub mod pacer;
 pub mod bitmap;
+pub mod card_table;
 pub mod concurrent_thread;
 pub mod controller;
 pub mod degenerated_gc;
 pub mod free_list;
 pub mod free_set;
-pub mod card_table;
-pub mod region;
-pub mod obj_storage;
-pub mod write_barrier;
 pub mod full_gc;
+pub mod heap;
 pub mod mark;
+pub mod obj_storage;
+pub mod pacer;
+pub mod region;
+pub mod safepoint;
 pub mod taskqueue;
+pub mod thread;
+pub mod write_barrier;
 //pub mod satb_mark_queue;
-pub mod memory_region;
-pub mod root_processor;
-pub mod virtual_memory;
-pub mod sweeper;
 pub mod concurrent_gc;
-pub mod stack;
-pub mod shared_vars;
-pub mod mark_bitmap;
-pub mod signals;
 pub mod heuristics;
-pub mod tlab;
+pub mod mark_bitmap;
 pub mod marking_context;
-
+pub mod memory_region;
+pub mod reference_queue;
+pub mod root_processor;
+pub mod shared_vars;
+pub mod signals;
+pub mod stack;
+pub mod sweeper;
+pub mod tlab;
+pub mod virtual_memory;
 
 #[inline(always)]
 pub const fn align_down(addr: usize, align: usize) -> usize {
@@ -51,8 +51,6 @@ pub const fn align_up(addr: usize, align: usize) -> usize {
 pub const fn is_aligned(addr: usize, align: usize) -> bool {
     addr & align.wrapping_sub(1) == 0
 }
-
-
 
 /// rounds the given value `val` up to the nearest multiple
 /// of `align`.
@@ -89,14 +87,14 @@ pub fn round_down_to_power_of_two32(value: u32) -> u32 {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum AllocType {
     ForLAB,
-    Shared, 
+    Shared,
 }
 
 pub struct AllocRequest {
     min_size: usize,
     requested_size: usize,
     actual_size: usize,
-    typ: AllocType
+    typ: AllocType,
 }
 
 impl AllocRequest {
@@ -158,16 +156,20 @@ impl DynBitmap {
     }
 
     fn get_byte(&self, bit_index: usize) -> u8 {
-        unsafe {  self.buffer
-            .get(Self::contained_byte_index(bit_index))
-            .copied()
-            .unwrap_unchecked() }
+        unsafe {
+            self.buffer
+                .get(Self::contained_byte_index(bit_index))
+                .copied()
+                .unwrap_unchecked()
+        }
     }
 
     fn get_byte_mut(&mut self, bit_index: usize) -> &mut u8 {
-        unsafe { self.buffer
-            .get_mut(Self::contained_byte_index(bit_index))
-            .unwrap_unchecked() }
+        unsafe {
+            self.buffer
+                .get_mut(Self::contained_byte_index(bit_index))
+                .unwrap_unchecked()
+        }
     }
 
     /// Get `value` from `byte` for exact bit-`index`.
@@ -191,19 +193,16 @@ impl DynBitmap {
         byte & !(1 << index) | ((value as u8) << index)
     }
 
-
-    pub fn set(&mut self, bit_index: usize, value: bool)  {
+    pub fn set(&mut self, bit_index: usize, value: bool) {
         let byte: &mut u8 = self.get_byte_mut(bit_index);
         let position: u8 = Self::position_in_byte(bit_index);
         *byte = Self::set_value(*byte, value, position);
     }
 
-
     pub fn write<W: std::io::Write>(&self, mut writer: W) -> std::io::Result<()> {
         writer.write_all(&self.buffer)
     }
 
-    
     pub fn byte_size(&self) -> usize {
         self.buffer.len()
     }
@@ -211,7 +210,6 @@ impl DynBitmap {
     pub fn arity(&self) -> usize {
         self.bit_count
     }
-
 
     pub fn iter(&self) -> impl Iterator<Item = bool> + '_ {
         self.buffer
@@ -259,9 +257,6 @@ impl std::iter::FromIterator<bool> for DynBitmap {
     }
 }
 
-
-
-
 #[inline(always)]
 pub fn atomic_load<T>(ptr: *const T, ordering: Ordering) -> T
 where
@@ -284,18 +279,18 @@ where
     }
 }
 #[inline(always)]
-pub fn atomic_cmpxchg<T>(data: &T, old: T, new: T) -> T 
-where T: Copy 
+pub fn atomic_cmpxchg<T>(data: &T, old: T, new: T) -> T
+where
+    T: Copy,
 {
     unsafe {
         let atomic: &Atomic<T> = std::mem::transmute(data);
         match atomic.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(val) => val,
-            Err(val) => val
+            Err(val) => val,
         }
     }
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum DegenPoint {
@@ -311,7 +306,7 @@ pub enum GCHeuristic {
     Agressive,
     Compact,
     Passive,
-    Static
+    Static,
 }
 
 impl GCHeuristic {
@@ -322,26 +317,26 @@ impl GCHeuristic {
             "compact" => GCHeuristic::Compact,
             "passive" => GCHeuristic::Passive,
             "static" => GCHeuristic::Static,
-            _ => panic!("Unknown GC heuristic: {}", s)
+            _ => panic!("Unknown GC heuristic: {}", s),
         }
-    } 
+    }
 }
 
 pub struct ConcurrentPhase {
     name: &'static str,
-    start: Instant
+    start: Instant,
 }
 
 pub struct PausePhase {
     name: &'static str,
-    start: Instant
+    start: Instant,
 }
 
 impl ConcurrentPhase {
     pub fn new(name: &'static str) -> Self {
         Self {
             name,
-            start: Instant::now()
+            start: Instant::now(),
         }
     }
 }
@@ -358,7 +353,7 @@ impl PausePhase {
     pub fn new(name: &'static str) -> Self {
         Self {
             name,
-            start: Instant::now()
+            start: Instant::now(),
         }
     }
 }

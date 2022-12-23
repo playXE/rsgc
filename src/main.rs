@@ -1,10 +1,11 @@
-use std::{sync::Arc, hint::black_box};
+use std::sync::Arc;
 
 use rsgc::{
     env::read_uint_from_env,
     heap::{region::HeapArguments, thread::Thread},
+    keep_on_stack,
     object::{Allocation, Handle},
-    traits::Object, keep_on_stack,
+    traits::Object,
 };
 
 #[allow(dead_code)]
@@ -53,17 +54,13 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
         node.as_mut().left = Some(create_tree(thread, depth - 1));
         node.as_mut().right = Some(create_tree(thread, depth - 1));
 
-        
         node
-        
     } else {
         let node = TreeNode {
             item: 0,
             left: None,
             right: None,
         };
-
-        keep_on_stack(&node);
 
         thread.allocate_fixed(node)
     };
@@ -115,8 +112,6 @@ fn bench_parallel() {
                     let tree_node = create_tree(thread, depth as _);
                     keep_on_stack(&tree_node);
                     check += tree_node.as_ref().check_tree();
-                    
-                    
                 }
 
                 *cloned[(depth - min_depth) / 2].lock() = format!(
@@ -144,10 +139,19 @@ fn bench_parallel() {
     );
 }
 
-
 fn main() {
     env_logger::init();
-    rsgc::thread::main_thread(HeapArguments::from_env(), |_| {
+    let mut args = HeapArguments::from_env();
+   
+    rsgc::thread::main_thread(args, |heap| {
+        heap.add_core_root_set();
         bench_parallel();
     });
 }
+
+/*
+fn main() {
+    let size = MarkBitmap::compute_size(4 * 1024 * 1024 * 1024);
+
+    println!("{}", formatted_size(size));
+}*/
