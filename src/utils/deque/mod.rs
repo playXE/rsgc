@@ -1,6 +1,6 @@
 use std::{mem::size_of, ptr::null_mut, sync::atomic::{AtomicPtr, AtomicUsize}};
 
-use crate::sync::monitor::Monitor;
+use crate::{sync::monitor::Monitor, offsetof};
 
 pub struct LocalSSB {
     pub index: usize,
@@ -8,6 +8,15 @@ pub struct LocalSSB {
 }
 
 impl LocalSSB {
+    pub fn index_offset() -> usize {
+        offsetof!(LocalSSB, index)
+    }
+
+    pub fn buffer_offset() -> usize {
+        offsetof!(LocalSSB, buf)
+    }
+
+
     pub fn try_enqueue(&mut self, obj: *mut u8) -> bool {
         let mut index = self.index;
         if index == 0 {

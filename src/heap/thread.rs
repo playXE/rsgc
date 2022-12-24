@@ -19,7 +19,7 @@ use crate::{
         mutex::{Condvar, Mutex, MutexGuard},
     },
     system::traits::Object,
-    utils::{deque::LocalSSB, machine_context::{PlatformRegisters, registers_from_ucontext}},
+    utils::{deque::LocalSSB, machine_context::{PlatformRegisters, registers_from_ucontext}}, offsetof,
 };
 use crate::{heap::tlab::ThreadLocalAllocBuffer, utils::ptr_queue::PtrQueueImpl};
 
@@ -63,6 +63,51 @@ pub struct Thread {
 }
 
 impl Thread {
+
+    pub fn safepoint_offset() -> usize {
+        offsetof!(Thread, safepoint)
+    }
+
+    pub fn mark_queue_offset() -> usize {
+        offsetof!(Thread, satb_mark_queue)
+    }
+
+    pub fn satb_buffer_offset() -> usize {
+        offsetof!(Thread, satb_mark_queue.buf)
+    }
+
+    pub fn satb_index_offset() -> usize {
+        offsetof!(Thread, satb_mark_queue.index)
+    }
+
+    pub fn cm_in_progress_offset() -> usize {
+        offsetof!(Thread, cm_in_progress)
+    }
+
+    pub fn mark_ctx_offset() -> usize {
+        offsetof!(Thread, mark_ctx)
+    }
+
+    pub fn mark_bitmap_offset() -> usize {
+        offsetof!(Thread, mark_bitmap)
+    }
+
+    pub fn tlab_start_offset() -> usize {
+        offsetof!(Thread, tlab.start)
+    }
+
+    pub fn tlab_top_offset() -> usize {
+        offsetof!(Thread, tlab.top)
+    }
+
+    pub fn tlab_end_offset() -> usize {
+        offsetof!(Thread, tlab.end)
+    }
+
+    pub fn tlab_bitmap_offset() -> usize {
+        offsetof!(Thread, tlab.bitmap)
+    }
+
     pub unsafe fn satb_mark_queue(&self) -> &LocalSSB {
         &self.satb_mark_queue
     }

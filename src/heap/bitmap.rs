@@ -5,20 +5,39 @@ use std::{
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
 
-use crate::{formatted_size, heap::{is_aligned, heap::heap}, utils::{sloppy_memset, round_up}};
+use crate::{formatted_size, heap::{is_aligned, heap::heap}, utils::{sloppy_memset, round_up}, offsetof};
 
 pub struct HeapBitmap<const ALIGN: usize> {
     offset: usize,
     limit: usize,
-    bmp: Box<[u8]>,
+    bmp: *mut u8,
+    size: usize,
 }
 
 impl<const ALIGN: usize> HeapBitmap<ALIGN> {
+
+    pub fn offset_offset() -> usize {
+        offsetof!(Self, offset)
+    }
+
+    pub fn bitmap_offset() -> usize {
+        offsetof!(Self, bmp)
+    }
+
+    pub fn size_offset() -> usize {
+        offsetof!(Self, size)
+    }
+
+    pub fn limit_offset() -> usize {
+        offsetof!(Self, limit)
+    }
+
     pub fn empty() -> Self {
         Self {
             limit: 0,
             offset: 0,
-            bmp: Box::new([]),
+            bmp: null_mut(),
+            size: 0
         }
     }
 
@@ -41,10 +60,16 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     }
 
     pub fn new(offset: usize, arena_size: usize) -> Self {
+        let mem = unsafe {
+            let mem = libc::malloc(Self::bitmap_size(arena_size)).cast::<u8>();
+            sloppy_memset::sloppy_memset(mem, 0, Self::bitmap_size(arena_size));
+            mem 
+        };
         Self {
             offset,
             limit: offset + arena_size,
-            bmp: vec![0; Self::bitmap_size(arena_size)].into_boxed_slice(),
+            bmp: mem,
+            size: Self::bitmap_size(arena_size)
         }
     }
 
@@ -53,11 +78,8 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     }
 
     fn cell(&self, ix: usize) -> u8 {
-        #[cfg(not(debug_assertions))]
-        unsafe { *self.bmp.get_unchecked(ix) }
-        #[cfg(debug_assertions)]
-        {
-            self.bmp[ix]
+        unsafe {
+            self.bmp.add(ix).read()
         }
     }
 
@@ -96,22 +118,13 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     #[inline]
     pub fn set_bit(&self, addr: usize) {
         let (index, bit) = self.object_start_index_bit(addr);
-        /*#[cfg(not(debug_assertions))]
-        unsafe { *self.bmp.get_unchecked_mut(index) |= 1 << bit };
-        #[cfg(debug_assertions)]
-        {
-            self.bmp[index] |= 1 << bit;
-        }*/
         self.cell_atomic(index).fetch_or(1 << bit, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub fn cell_atomic(&self, index: usize) -> &AtomicU8 {
-        #[cfg(not(debug_assertions))]
-        unsafe { &*(self.bmp.as_ptr().add(index) as *const AtomicU8) }
-        #[cfg(debug_assertions)]
         unsafe {
-            std::mem::transmute(&self.bmp[index])
+            &*self.bmp.add(index).cast::<AtomicU8>()
         }
     }
 
@@ -145,19 +158,15 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     #[inline]
     pub fn clear_bit(&mut self, addr: usize) {
         let (index, bit) = self.object_start_index_bit(addr);
-        self.bmp[index] &= !(1 << bit);
+        self.cell_atomic(index).fetch_and(!(1 << bit), Ordering::Relaxed);
+        //self.bmp[index] &= !(1 << bit);
     }
 
     #[inline]
     pub fn check_bit(&self, addr: usize) -> bool {
         debug_assert!(is_aligned(addr, ALIGN));
         let (index, bit) = self.object_start_index_bit(addr);
-        #[cfg(not(debug_assertions))]
-        unsafe { (*self.bmp.get_unchecked(index) & (1 << bit)) != 0 }
-        #[cfg(debug_assertions)]
-        {
-            self.bmp[index] & (1 << bit) != 0
-        }
+        (self.cell_atomic(index).load(Ordering::Relaxed) & (1 << bit)) != 0
     }
 
     #[inline(always)]
@@ -188,7 +197,10 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
         let start_index = begin_offset / ALIGN / Self::bits_per_cell();
         let end_index = end_offset / ALIGN / Self::bits_per_cell();
 
-        self.bmp[start_index..end_index].fill(0);
+        unsafe {
+            sloppy_memset::sloppy_memset(self.bmp.add(start_index), 0, end_index - start_index);
+        }
+        //self.bmp[start_index..end_index].fill(0);
     }
 
     pub fn is_marked_range(&self, begin: usize, end: usize) -> bool {
@@ -215,7 +227,11 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
 
         let start_index = begin_offset / ALIGN / Self::bits_per_cell();
         let end_index = end_offset / ALIGN / Self::bits_per_cell();
-        self.bmp[start_index..end_index].iter().any(|x| *x != 0)
+        unsafe {
+            let bmp = std::slice::from_raw_parts(self.bmp.add(start_index), end_index - start_index);
+            bmp.iter().any(|x| *x != 0)
+        }
+        //self.bmp[start_index..end_index].iter().any(|x| *x != 0)
     }
 
     pub fn clear_range_atomic(&self, begin: usize, end: usize) {
@@ -242,7 +258,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
 
     pub fn clear(&mut self) {
         unsafe {
-            sloppy_memset::sloppy_memset(self.bmp.as_mut_ptr().cast(), 0, self.bmp.len());
+            sloppy_memset::sloppy_memset(self.bmp, 0, self.size);
         }
         //self.bmp.fill(0);
     }
@@ -296,8 +312,8 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     ) {
         let buffer_size = size_of::<usize>() * Self::bits_per_cell();
 
-        let live = live_bitmap.bmp.as_ptr() as *const AtomicU8;
-        let mark = mark_bitmap.bmp.as_ptr() as *const AtomicU8;
+        let live = live_bitmap.bmp as *const AtomicU8;
+        let mark = mark_bitmap.bmp as *const AtomicU8;
         unsafe {
             let (start, _) = live_bitmap.object_start_index_bit(sweep_begin);
             let (end, _) = live_bitmap.object_start_index_bit(sweep_end);
@@ -357,7 +373,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
         let (index_start, start_bit) = self.object_start_index_bit(visit_begin);
         let (index_end, end_bit) = self.object_start_index_bit(visit_end);
 
-        let mut left_edge = self.bmp[index_start];
+        let mut left_edge = self.cell(index_start);
 
         left_edge &= !((1 << start_bit) - 1);
 
@@ -405,7 +421,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
             if end_bit == 0 {
                 right_edge = 0;
             } else {
-                right_edge = self.bmp[index_end];
+                right_edge = self.cell(index_end);
             }
         } else {
             right_edge = left_edge;

@@ -11,9 +11,9 @@ use crate::{formatted_size, heap::bitmap::HeapBitmap};
 //            time across multiple threads. The park()/unpark() pair is
 //            used to make it available for such multiplexing.
 pub struct ThreadLocalAllocBuffer {
-    start: usize,
-    top: usize,
-    end: usize,
+    pub(crate) start: usize,
+    pub(crate) top: usize,
+    pub(crate) end: usize,
 
     pub(crate) bitmap: *const HeapBitmap<16>,
 
