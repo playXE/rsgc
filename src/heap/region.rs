@@ -4,7 +4,7 @@ use std::{mem::size_of, ptr::null_mut, time::Instant};
 
 use crate::env::{get_total_memory, read_float_from_env};
 use crate::heap::heap::heap;
-use crate::object::HeapObjectHeader;
+use crate::system::object::HeapObjectHeader;
 use crate::{env::read_uint_from_env, formatted_size};
 
 use super::marking_context::MarkingContext;

@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicUsize;
 
-use crate::{object::HeapObjectHeader, traits::Visitor, utils::taskqueue::*};
+use crate::{system::object::HeapObjectHeader, system::traits::Visitor, utils::taskqueue::*};
 
 use super::{
     bitmap::HeapBitmap,

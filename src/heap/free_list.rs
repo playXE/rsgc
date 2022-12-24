@@ -3,7 +3,7 @@ use std::{mem::size_of, ptr::null_mut};
 use crate::{
     formatted_size,
     heap::heap::heap,
-    object::{HeapObjectHeader, SizeTag, VtableTag},
+    system::object::{HeapObjectHeader, SizeTag, VtableTag},
 };
 
 use super::{region::HeapOptions, round_down_to_power_of_two32, which_power_of_two};

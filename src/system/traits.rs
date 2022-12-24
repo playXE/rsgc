@@ -1,3 +1,5 @@
+use crate::system::object::*;
+
 pub trait Object {
     fn trace(&self, visitor: &mut dyn Visitor) {
         let _ = visitor;
@@ -33,7 +35,7 @@ macro_rules! impl_simple {
     ($($t: ty)*) => {
         $(
             impl Object for $t {}
-            impl $crate::object::Allocation for $t {}
+            impl $crate::system::object::Allocation for $t {}
         )*
     };
 }

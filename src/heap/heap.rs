@@ -11,10 +11,10 @@ use std::{
 use crate::{
     formatted_size,
     heap::{root_processor::RootTask, safepoint::SafepointSynchronize},
-    object::HeapObjectHeader,
+    system::object::HeapObjectHeader,
     sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
     thread::threads,
-    traits::{Visitor, WeakProcessor},
+    system::traits::{Visitor, WeakProcessor},
 };
 
 use super::{

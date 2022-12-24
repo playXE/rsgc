@@ -11,7 +11,7 @@ use super::{
 };
 use crate::heap::taskqueue::MarkTask;
 use crate::utils::taskqueue::*;
-use crate::{object::HeapObjectHeader, traits::Visitor, utils::stack::Stack};
+use crate::{system::object::HeapObjectHeader, system::traits::Visitor, utils::stack::Stack};
 
 pub struct RootSet {
     roots: Vec<Arc<dyn Root>>,
@@ -114,7 +114,7 @@ impl RootProcessor {
         }
     }
 
-    pub fn add_root(&self, root: Arc<dyn Root>) {
+    pub fn  add_root(&self, root: Arc<dyn Root>) {
         let task = RootTask {
             root: root.clone(),
             task: Box::new(move |processor| root.execute(processor)),

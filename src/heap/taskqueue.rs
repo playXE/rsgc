@@ -1,7 +1,7 @@
 use std::{mem::size_of, sync::atomic::AtomicUsize, ptr::null_mut, ops::{Deref, DerefMut}};
 
 use crate::{
-    object::HeapObjectHeader,
+    system::object::HeapObjectHeader,
     utils::{nth_bit, right_nth_bit, taskqueue::*},
 };
 

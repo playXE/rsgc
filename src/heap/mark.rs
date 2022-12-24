@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::object::HeapObjectHeader;
+use crate::system::object::HeapObjectHeader;
 use crate::sync::suspendible_thread_set::SuspendibleThreadSetLeaver;
-use crate::traits::Visitor;
+use crate::system::traits::Visitor;
 
 use super::heap::{heap, Heap};
 use super::marking_context::MarkingContext;

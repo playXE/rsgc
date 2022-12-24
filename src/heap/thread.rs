@@ -13,12 +13,12 @@ use std::{
 use crate::{
     formatted_size,
     heap::{mark::MarkTask, stack::approximate_stack_pointer, align_down},
-    object::{Allocation, ConstVal, Handle, HeapObjectHeader, SizeTag, VTable, VtableTag, VT},
+    system::object::{Allocation, ConstVal, Handle, HeapObjectHeader, SizeTag, VTable, VtableTag, VT},
     sync::{
         self,
         mutex::{Condvar, Mutex, MutexGuard},
     },
-    traits::Object,
+    system::traits::Object,
     utils::{deque::LocalSSB, machine_context::{PlatformRegisters, registers_from_ucontext}},
 };
 use crate::{heap::tlab::ThreadLocalAllocBuffer, utils::ptr_queue::PtrQueueImpl};

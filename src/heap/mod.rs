@@ -285,7 +285,21 @@ where
 {
     unsafe {
         let atomic: &Atomic<T> = std::mem::transmute(data);
-        match atomic.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
+        match atomic.compare_exchange_weak(old, new, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(val) => val,
+            Err(val) => val,
+        }
+    }
+}
+
+#[inline(always)]
+pub fn atomic_cmpxchg_weak<T>(data: &T, old: T, new: T, ordering: Ordering) -> T
+where
+    T: Copy,
+{
+    unsafe {
+        let atomic: &Atomic<T> = std::mem::transmute(data);
+        match atomic.compare_exchange_weak(old, new, ordering, Ordering::Relaxed) {
             Ok(val) => val,
             Err(val) => val,
         }

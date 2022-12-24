@@ -6,7 +6,7 @@ use std::{
     sync::atomic::AtomicUsize,
 };
 use crate::heap::*;
-use crate::{utils::stack::Stack, object::HeapObjectHeader};
+use crate::{utils::stack::Stack, system::object::HeapObjectHeader};
 
 #[cfg(target_pointer_width = "64")]
 pub type Idx = u32;

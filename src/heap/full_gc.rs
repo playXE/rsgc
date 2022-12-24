@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::ptr::null_mut;
 use std::sync::atomic::AtomicUsize;
 
 use super::heap::{heap, Heap};
@@ -11,8 +12,9 @@ use crate::heap::controller::GCMode;
 use crate::heap::safepoint::SafepointSynchronize;
 use crate::heap::sweeper::SweepGarbageClosure;
 use crate::heap::thread::Thread;
-use crate::object::HeapObjectHeader;
-use crate::traits::Visitor;
+use crate::system::object::HeapObjectHeader;
+use crate::system::traits::{Visitor, Object};
+use crate::system::weak_reference::WeakReference;
 use parking_lot::lock_api::RawMutex;
 use parking_lot::MutexGuard;
 
@@ -55,9 +57,16 @@ impl FullGC {
         }
 
         {
-            let phase = PausePhase::new("Process weak refs");
-            // Phase 2: Process weak references
-            self.heap.process_weak_refs();
+            let phase = PausePhase::new("Clean up weak references");
+            WeakReference::<dyn Object>::process(|pointer| {
+                let header = pointer.cast::<HeapObjectHeader>().sub(1);
+                
+                if self.heap.marking_context().is_marked(header) {
+                    pointer 
+                } else {
+                    null_mut()
+                }
+            });
             drop(phase);
         }
         

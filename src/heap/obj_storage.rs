@@ -1,7 +1,7 @@
 use crate::{
-    object::{AtomicHandle, Handle, HeapObjectHeader},
+    system::object::{AtomicHandle, Handle, HeapObjectHeader},
     sync::{mutex::RawMutex, single_writer::SingleWriterSynchronizer},
-    traits::Object,
+    system::traits::Object,
     utils::log2i_graceful,
 };
 use atomic::{fence, Ordering};

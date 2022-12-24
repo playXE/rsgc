@@ -4,8 +4,8 @@ use rsgc::{
     env::read_uint_from_env,
     heap::{region::HeapArguments, thread::Thread},
     keep_on_stack,
-    object::{Allocation, Handle},
-    traits::Object,
+    system::object::{Allocation, Handle},
+    system::{traits::Object, weak_reference::WeakReference},
 };
 
 #[allow(dead_code)]
@@ -16,7 +16,7 @@ pub struct TreeNode {
 }
 
 impl Object for TreeNode {
-    fn trace(&self, visitor: &mut dyn rsgc::traits::Visitor) {
+    fn trace(&self, visitor: &mut dyn rsgc::system::traits::Visitor) {
         if let Some(ref left) = self.left {
             left.trace(visitor);
         }
@@ -139,13 +139,28 @@ fn bench_parallel() {
     );
 }
 
+#[inline(never)]
+#[cold]
+fn foo(thread: &mut Thread) -> Handle<WeakReference<i32>> {
+    let x = thread.allocate_fixed(42);
+    WeakReference::new(thread, x)
+}
+
 fn main() {
     env_logger::init();
-    let mut args = HeapArguments::from_env();
+    let args = HeapArguments::from_env();
    
     rsgc::thread::main_thread(args, |heap| {
         heap.add_core_root_set();
-        bench_parallel();
+        let weak = foo(Thread::current());
+
+
+        heap.request_gc();
+
+        match weak.upgrade() {
+            Some(x) => println!("weak {:p}", x),
+            None => println!("None"),
+        }
     });
 }
 

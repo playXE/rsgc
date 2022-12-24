@@ -3,7 +3,7 @@ use std::{collections::HashSet, intrinsics::unlikely, ptr::null_mut, sync::atomi
 use crossbeam_queue::SegQueue;
 use parking_lot::{lock_api::RawMutex, Mutex};
 
-use crate::{formatted_size, object::HeapObjectHeader, utils::stack::Stack};
+use crate::{formatted_size, system::object::HeapObjectHeader, utils::stack::Stack};
 
 use super::{
     heap::{heap, Heap, HeapRegionClosure},

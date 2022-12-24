@@ -1,6 +1,6 @@
 use crossbeam_deque::{Injector, Steal, Worker};
 
-use crate::object::HeapObjectHeader;
+use crate::system::object::HeapObjectHeader;
 
 pub struct ReferenceQueue {
     workers: Vec<Worker<Reference>>,

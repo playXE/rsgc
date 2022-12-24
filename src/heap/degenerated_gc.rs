@@ -1,13 +1,13 @@
-use std::sync::atomic::AtomicUsize;
+use std::{sync::atomic::AtomicUsize, ptr::null_mut};
 
 use atomic::Ordering;
 use parking_lot::lock_api::RawMutex;
 
-use crate::heap::{
+use crate::{heap::{
     concurrent_gc::{ConcMark, PrepareUnsweptRegions},
     mark::STWMark,
     sweeper::{Sweep, SweepGarbageClosure}, PausePhase,
-};
+}, system::{weak_reference::WeakReference, object::HeapObjectHeader, traits::Object}};
 
 use super::{
     heap::{heap, Heap},
@@ -75,6 +75,18 @@ impl DegeneratedGC {
         }
 
         if self.degen_point == DegenPoint::ConcurrentSweep {
+            let phase = PausePhase::new("Clean up weak references");
+            WeakReference::<dyn Object>::process(|pointer| {
+                let header = pointer.cast::<HeapObjectHeader>().sub(1);
+                
+                if self.heap.marking_context().is_marked(header) {
+                    pointer 
+                } else {
+                    null_mut()
+                }
+            });
+            drop(phase);
+            
             let phase = PausePhase::new("Degenerate GC: Sweep");
             
             let sweep = SweepGarbageClosure {

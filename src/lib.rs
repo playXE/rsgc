@@ -24,15 +24,11 @@ pub const fn mem_has_ptr(p: i32) -> bool {
     (!(p & 2)) != 0
 }
 
-//pub mod gc;
-//pub mod arena;
-//pub mod weak_random;
 pub mod bitfield;
 pub mod env;
+pub mod system;
 pub mod heap;
-pub mod object;
 pub mod sync;
-pub mod traits;
 pub mod utils;
 
 pub struct FormattedSize {
@@ -99,10 +95,6 @@ macro_rules! offsetof {
 }
 
 
-#[inline(never)]
-pub fn allocate_i32(thread: &mut heap::thread::Thread, x: i32) -> object::Handle<i32> {
-    thread.allocate_fixed(x)
-}
 
 pub use heap::thread;
 
