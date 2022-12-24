@@ -1,5 +1,5 @@
 use crate::{
-    system::object::{AtomicHandle, Handle, HeapObjectHeader},
+    system::object::{Handle, HeapObjectHeader},
     sync::{mutex::RawMutex, single_writer::SingleWriterSynchronizer},
     system::traits::Object,
     utils::log2i_graceful,

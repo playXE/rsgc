@@ -20,7 +20,6 @@ pub mod obj_storage;
 pub mod pacer;
 pub mod region;
 pub mod safepoint;
-pub mod taskqueue;
 pub mod thread;
 pub mod write_barrier;
 //pub mod satb_mark_queue;

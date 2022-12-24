@@ -1,14 +1,15 @@
 use std::{
     mem::size_of,
-    sync::atomic::{AtomicBool, AtomicUsize}, ptr::null_mut,
+    ptr::null_mut,
+    sync::atomic::{AtomicBool, AtomicUsize},
 };
 
 use parking_lot::lock_api::RawMutex;
 
 use crate::{
     heap::{sweeper::SweepGarbageClosure, ConcurrentPhase, PausePhase},
-    system::{object::HeapObjectHeader, weak_reference::WeakReference, traits::Object},
     sync::suspendible_thread_set::SuspendibleThreadSetJoiner,
+    system::{object::HeapObjectHeader, traits::Object, weak_reference::WeakReference},
 };
 
 use super::{
@@ -51,7 +52,6 @@ impl ConcurrentGC {
         unsafe {
             let start = std::time::Instant::now();
             // Phase 1: Mark
-            
             let threads = SafepointSynchronize::begin();
             log::debug!(target: "gc-safepoint", "stopped the world ({} thread(s)) in {} ms", threads.len(), start.elapsed().as_millis());
             let mark = ConcMark::new();
@@ -98,14 +98,15 @@ impl ConcurrentGC {
                 let phase = PausePhase::new("Clean up weak references");
                 WeakReference::<dyn Object>::process(|pointer| {
                     let header = pointer.cast::<HeapObjectHeader>().sub(1);
-                    
+
                     if self.heap.marking_context().is_marked(header) {
-                        pointer 
+                        pointer
                     } else {
                         null_mut()
                     }
                 });
                 drop(phase);
+
                 let phase = PausePhase::new("Prepare unswept regions");
                 let sweep_start = std::time::Instant::now();
                 let prep = PrepareUnsweptRegions {};

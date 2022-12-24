@@ -9,7 +9,6 @@ use super::{
     memory_region::MemoryRegion,
     region::HeapRegion,
     shared_vars::SharedFlag,
-    taskqueue::{ObjToScanQueue, ObjToScanQueueSet},
 };
 
 #[repr(C)]

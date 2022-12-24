@@ -11,7 +11,7 @@ use std::{
 use crate::{
     formatted_size,
     heap::{root_processor::RootTask, safepoint::SafepointSynchronize},
-    system::object::HeapObjectHeader,
+    system::{object::HeapObjectHeader},
     sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
     thread::threads,
     system::traits::{Visitor, WeakProcessor},
@@ -831,8 +831,8 @@ impl Drop for Heap {
     fn drop(&mut self) {
         self.cancel_gc();
         self.controller_thread.as_mut().unwrap().stop();
-
         let _ = unsafe { Box::from_raw(self.marking_context) };
+        let _ = unsafe { Box::from_raw(self.controller_thread.as_mut().unwrap()) };
     }
 }
 

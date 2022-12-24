@@ -1,7 +1,7 @@
 use super::traits::*;
 use crate::heap::thread::*;
 use super::object::*;
-use std::mem::size_of;
+use std::{mem::size_of, ops::{Deref, DerefMut}};
 #[repr(C)]
 pub struct Array<T: Object + Sized> {
     length: u32,
@@ -16,11 +16,56 @@ impl<T: 'static + Object + Sized> Array<T> {
         for i in 0..len {
             unsafe {
                 let data = (*arr).data.as_mut_ptr().add(i);
+                th.write_barrier(result);
                 data.write(init(i));
                 (*arr).init_length += 1;
             }
         }
         unsafe { result.assume_init() }
+    }
+}
+
+impl<T: Object> Deref for Array<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr(), self.length as _) }
+    }
+}
+
+impl<T: Object> DerefMut for Array<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.data.as_mut_ptr(), self.length as _) }
+    }
+}
+
+impl<T: Object> Array<T> {
+    pub fn len(&self) -> usize {
+        self.length as _
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index < self.len() {
+            Some(&self[index])
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index < self.len() {
+            Some(&mut self[index])
+        } else {
+            None
+        }
+    }
+
+    pub fn set(&mut self, index: usize, val: T) -> Option<T> {
+        if index < self.len() {
+            let old = std::mem::replace(&mut self[index], val);
+            Some(old)
+        } else {
+            None
+        }
     }
 }
 
@@ -42,9 +87,18 @@ impl<T: Object> Object for Array<T> {
 
     fn trace_range(&self, from: usize, to: usize, visitor: &mut dyn Visitor) {
         unsafe {
+            if from >= self.init_length as usize {
+                return;
+            }
             let slice = std::slice::from_raw_parts(self.data.as_ptr().add(from), to - from);
+            let mut actual_index = from;
             for val in slice.iter() {
-                val.trace(visitor);
+                if actual_index < self.init_length as usize {
+                    val.trace(visitor);
+                } else {
+                    return;
+                }
+                actual_index += 1;
             }
         }
     }
@@ -75,4 +129,11 @@ impl<T: Object + Sized + Allocation> Allocation for Array<T> {
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
     const VARSIZE_OFFSETOF_LENGTH: usize = 0;
     const VARSIZE_OFFSETOF_VARPART: usize = size_of::<usize>();
+}
+use std::fmt;
+
+impl<T: fmt::Debug + Object> fmt::Debug for Array<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
 }

@@ -365,7 +365,11 @@ impl HeapObjectHeader {
 
     pub fn visit_pointers(&mut self, visitor: &mut dyn Visitor) -> usize {
         self.visit(visitor);
-
+        if let Some(iter) = self.vtable().varsize.iterate_range {
+            let start = 0;
+            let end = self.array_length();
+            iter(self.data() as _, start, end, visitor);
+        }
         self.heap_size()
     }
     #[inline]
@@ -434,13 +438,7 @@ impl<T: Object + ?Sized> Handle<T> {
             marker: Default::default(),
         }
     }
-    #[inline]
-    pub fn make_atomic(this: &Self) -> AtomicHandle<T> {
-        AtomicHandle {
-            ptr: this.ptr.as_ptr(),
-            marker: Default::default(),
-        }
-    }
+
 }
 
 impl Handle<dyn Object> {
@@ -493,101 +491,7 @@ impl<T: Object + ?Sized> Allocation for Handle<T> {
     const NO_HEAP_PTRS: bool = false;
 }
 
-pub struct AtomicHandle<T: Object + ?Sized> {
-    ptr: *mut u8,
-    marker: PhantomData<*const T>,
-}
 
-impl<T: Object + ?Sized> AtomicHandle<T> {
-    pub const fn null() -> Self {
-        Self {
-            ptr: null_mut(),
-            marker: PhantomData,
-        }
-    }
-
-    pub fn load(&self, order: atomic::Ordering) -> Option<Handle<T>> {
-        Some(Handle {
-            ptr: NonNull::new(atomic_load(&self.ptr, order))?,
-            marker: PhantomData,
-        })
-    }
-
-    pub fn load_ptr(&self, order: atomic::Ordering) -> *mut u8 {
-        atomic_load(&self.ptr, order)
-    }
-
-    pub fn compare_exchange_weak(
-        &self,
-        current: Option<Handle<T>>,
-        new: Option<Handle<T>>,
-        success: atomic::Ordering,
-        failure: atomic::Ordering,
-    ) -> Result<Option<Handle<T>>, Option<Handle<T>>> {
-        let current = current.map(|o| o.ptr.as_ptr()).unwrap_or(null_mut());
-        let new = new.map(|o| o.ptr.as_ptr()).unwrap_or(null_mut());
-        unsafe {
-            let addr: &AtomicPtr<u8> = &*(self.ptr as *const _ as *const AtomicPtr<u8>); 
-
-            match addr.compare_exchange_weak(current, new, success, failure) {
-                Ok(ptr) => Ok(NonNull::new(ptr).map(|ptr| Handle {
-                    ptr,
-                    marker: PhantomData,
-                })),
-                Err(ptr) => Err(NonNull::new(ptr).map(|ptr| Handle {
-                    ptr,
-                    marker: PhantomData,
-                })),
-            }
-        }
-    }
-
-    pub fn store(&self, val: Option<Handle<T>>, order: atomic::Ordering) {
-        atomic_store(
-            &self.ptr,
-            val.map(|o| o.ptr.as_ptr()).unwrap_or(null_mut()),
-            order,
-        )
-    }
-
-    pub fn is_null(&self) -> bool {
-        self.load_relaxed().is_none()
-    }
-
-    pub fn load_relaxed(&self) -> Option<Handle<T>> {
-        self.load(atomic::Ordering::Relaxed)
-    }
-
-    pub fn store_relaxed(&self, val: Option<Handle<T>>) {
-        self.store(val, atomic::Ordering::Relaxed);
-    }
-
-    pub fn load_acquire(&self) -> Option<Handle<T>> {
-        self.load(atomic::Ordering::Acquire)
-    }
-
-    pub fn store_release(&self, val: Option<Handle<T>>) {
-        self.store(val, atomic::Ordering::Release);
-    }
-}
-
-impl<T: Object + ?Sized> Clone for AtomicHandle<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T: Object + ?Sized> Copy for AtomicHandle<T> {}
-unsafe impl<T: Object + ?Sized> Send for AtomicHandle<T> {}
-unsafe impl<T: Object + ?Sized> Sync for AtomicHandle<T> {}
-
-impl<T: Object + ?Sized> Object for AtomicHandle<T> {
-    fn trace(&self, visitor: &mut dyn Visitor) {
-        if let Some(handle) = self.load_acquire() {
-            visitor.visit(handle.ptr.as_ptr());
-        }
-    }
-}
 
 impl<T: Object + Sized> Deref for Handle<T> {
     type Target = T;
@@ -601,3 +505,16 @@ impl<T: Object + Sized> DerefMut for Handle<T> {
         self.as_mut()
     }
 }
+
+impl<T: Object + fmt::Debug> fmt::Debug for Handle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(f)
+    }
+}
+
+impl<T: Object + fmt::Display> fmt::Display for Handle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(f)
+    }
+}
+

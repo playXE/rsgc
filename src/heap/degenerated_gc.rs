@@ -30,7 +30,6 @@ impl DegeneratedGC {
 
     pub unsafe fn collect(&mut self) {
         let start = std::time::Instant::now();
-
         let threads = SafepointSynchronize::begin();
         log::debug!(target: "gc-safepoint", "stopped the world ({} thread(s)) in {} ms", threads.len(), start.elapsed().as_millis());
         self.heap.clear_cancelled_gc();
@@ -87,6 +86,7 @@ impl DegeneratedGC {
             });
             drop(phase);
             
+        
             let phase = PausePhase::new("Degenerate GC: Sweep");
             
             let sweep = SweepGarbageClosure {
@@ -105,5 +105,6 @@ impl DegeneratedGC {
         }
 
         SafepointSynchronize::end(threads);
+        
     }
 }

@@ -7,7 +7,7 @@ use std::{
 };
 
 use super::{
-    object::{Allocation, AtomicHandle, Handle},
+    object::{Allocation, Handle},
     traits::Object,
 };
 
@@ -114,3 +114,10 @@ impl<T: ?Sized + Object> WeakReference<T> {
 
 impl<T: ?Sized + Object> Object for WeakReference<T> {}
 impl<T: ?Sized + Object> Allocation for WeakReference<T> {}
+
+pub struct WeakMapping<K: ?Sized + Object, V: ?Sized + Object> {
+    key: *mut u8,
+    value: Handle<V>,
+    next: AtomicPtr<u8>,
+    marker: PhantomData<K>,
+}

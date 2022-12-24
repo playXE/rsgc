@@ -5,7 +5,7 @@ use rsgc::{
     heap::{region::HeapArguments, thread::Thread},
     keep_on_stack,
     system::object::{Allocation, Handle},
-    system::{traits::Object, weak_reference::WeakReference},
+    system::traits::Object,
 };
 
 #[allow(dead_code)]
@@ -139,34 +139,13 @@ fn bench_parallel() {
     );
 }
 
-#[inline(never)]
-#[cold]
-fn foo(thread: &mut Thread) -> Handle<WeakReference<i32>> {
-    let x = thread.allocate_fixed(42);
-    WeakReference::new(thread, x)
-}
-
 fn main() {
     env_logger::init();
     let args = HeapArguments::from_env();
-   
+
     rsgc::thread::main_thread(args, |heap| {
         heap.add_core_root_set();
-        let weak = foo(Thread::current());
 
-
-        heap.request_gc();
-
-        match weak.upgrade() {
-            Some(x) => println!("weak {:p}", x),
-            None => println!("None"),
-        }
+        bench_parallel();
     });
 }
-
-/*
-fn main() {
-    let size = MarkBitmap::compute_size(4 * 1024 * 1024 * 1024);
-
-    println!("{}", formatted_size(size));
-}*/

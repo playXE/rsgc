@@ -9,7 +9,6 @@ use super::{
     heap::{heap, Heap},
     thread::Thread,
 };
-use crate::heap::taskqueue::MarkTask;
 use crate::utils::taskqueue::*;
 use crate::{system::object::HeapObjectHeader, system::traits::Visitor, utils::stack::Stack};
 
