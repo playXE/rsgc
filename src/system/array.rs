@@ -1,7 +1,7 @@
 use super::traits::*;
 use crate::heap::thread::*;
 use super::object::*;
-use std::{mem::size_of, ops::{Deref, DerefMut}};
+use std::{mem::size_of, ops::{Deref, DerefMut}, hash::Hash};
 #[repr(C)]
 pub struct Array<T: Object + Sized> {
     length: u32,
@@ -137,3 +137,43 @@ impl<T: fmt::Debug + Object> fmt::Debug for Array<T> {
         f.debug_list().entries(self.iter()).finish()
     }
 }
+
+impl<T: Object + PartialEq<U>, U: Object + PartialEq<T>> PartialEq<Array<U>> for Array<T> {
+    fn eq(&self, other: &Array<U>) -> bool {
+        self.as_ref().eq(other.as_ref())
+    }
+}
+
+impl<T: Object + Eq> Eq for Array<T> {}
+
+impl<T: Object + Hash> Hash for Array<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
+    }
+}
+
+impl<T: Object> AsRef<[T]> for Array<T> {
+    fn as_ref(&self) -> &[T] {
+        self
+    }
+}
+
+impl<T: Object> AsMut<[T]> for Array<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self
+    }
+}
+
+impl<T: Object + PartialOrd> PartialOrd for Array<T> {
+    fn partial_cmp(&self, other: &Array<T>) -> Option<std::cmp::Ordering> {
+        self.as_ref().partial_cmp(other.as_ref())
+    }
+}
+
+impl<T: Object + Ord> Ord for Array<T> {
+    fn cmp(&self, other: &Array<T>) -> std::cmp::Ordering {
+        self.as_ref().cmp(other.as_ref())
+    }
+}
+
+

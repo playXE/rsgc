@@ -5,7 +5,7 @@ use std::{
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
-    sync::atomic::{AtomicPtr, AtomicU64},
+    sync::atomic::{AtomicPtr, AtomicU64}, hash::{Hash, Hasher},
 };
 
 use atomic::Ordering;
@@ -518,3 +518,40 @@ impl<T: Object + fmt::Display> fmt::Display for Handle<T> {
     }
 }
 
+impl<T: Object + Hash> Hash for Handle<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state)
+    }
+}
+
+impl<T: Object> AsRef<T> for Handle<T> {
+    fn as_ref(&self) -> &T {
+        self.as_ref()
+    }
+}
+
+impl<T: Object> AsMut<T> for Handle<T> {
+    fn as_mut(&mut self) -> &mut T {
+        self.as_mut()
+    }
+}
+
+impl<T: Object + PartialEq<U>, U: Object + PartialEq<T>> PartialEq<Handle<U>> for Handle<T> {
+    fn eq(&self, other: &Handle<U>) -> bool {
+        self.as_ref().eq(other.as_ref())
+    }
+}
+
+impl<T: Object + Eq> Eq for Handle<T> {}
+
+impl<T: Object + PartialOrd<U>, U: Object + PartialOrd<T>> PartialOrd<Handle<U>> for Handle<T> {
+    fn partial_cmp(&self, other: &Handle<U>) -> Option<std::cmp::Ordering> {
+        self.as_ref().partial_cmp(other.as_ref())
+    }
+}
+
+impl<T: Object + Ord> Ord for Handle<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_ref().cmp(other.as_ref())
+    }
+}

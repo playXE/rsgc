@@ -3,4 +3,4 @@ pub mod traits;
 pub mod array;
 pub mod weak_reference;
 pub mod finalizer;
-
+pub mod string;

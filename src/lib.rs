@@ -26,9 +26,9 @@ pub const fn mem_has_ptr(p: i32) -> bool {
 
 pub mod bitfield;
 pub mod env;
-pub mod system;
 pub mod heap;
 pub mod sync;
+pub mod system;
 pub mod utils;
 
 pub struct FormattedSize {
@@ -82,19 +82,17 @@ pub fn force_on_stack<T>(val: *const T) {
     }
 }
 
-
 #[macro_export]
 macro_rules! offsetof {
-    ($obj: ty, $($field: ident).+) => {
+    ($obj: ty, $($field: ident).+) => {{
         #[allow(unused_unsafe)]
         unsafe {
             let addr = 0x4000 as *const $obj;
             &(*addr).$($field).* as *const _ as usize - 0x4000
         }
+    }
     };
 }
-
-
 
 pub use heap::thread;
 
