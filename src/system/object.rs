@@ -5,7 +5,7 @@ use std::{
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
-    sync::atomic::{AtomicPtr, AtomicU64}, hash::{Hash, Hasher},
+    sync::atomic::{AtomicPtr, AtomicU64}, hash::{Hash, Hasher}, borrow::BorrowMut,
 };
 
 use atomic::Ordering;
@@ -523,16 +523,16 @@ impl<T: Object + Hash> Hash for Handle<T> {
         self.as_ref().hash(state)
     }
 }
-
-impl<T: Object> AsRef<T> for Handle<T> {
-    fn as_ref(&self) -> &T {
-        self.as_ref()
+use std::borrow::Borrow;
+impl<T: Object + Borrow<U>, U> AsRef<U> for Handle<T> {
+    fn as_ref(&self) -> &U {
+        self.as_ref().borrow()
     }
 }
 
-impl<T: Object> AsMut<T> for Handle<T> {
-    fn as_mut(&mut self) -> &mut T {
-        self.as_mut()
+impl<T: Object + BorrowMut<U>, U> AsMut<U> for Handle<T> {
+    fn as_mut(&mut self) -> &mut U {
+        self.as_mut().borrow_mut()
     }
 }
 
