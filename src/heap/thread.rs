@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     intrinsics::{likely, unlikely},
     mem::{size_of, MaybeUninit},
-    panic::UnwindSafe,
+    panic::{AssertUnwindSafe, UnwindSafe},
     ptr::{null, null_mut},
     sync::atomic::{AtomicI8, AtomicUsize, Ordering},
     thread::{JoinHandle, ThreadId},
@@ -12,14 +12,20 @@ use std::{
 
 use crate::{
     formatted_size,
-    heap::{mark::MarkTask, stack::approximate_stack_pointer, align_down},
-    system::object::{Allocation, ConstVal, Handle, HeapObjectHeader, SizeTag, VTable, VtableTag, VT},
+    heap::{align_down, mark::MarkTask, stack::approximate_stack_pointer},
+    offsetof,
     sync::{
         self,
         mutex::{Condvar, Mutex, MutexGuard},
     },
+    system::object::{
+        Allocation, ConstVal, Handle, HeapObjectHeader, SizeTag, VTable, VtableTag, VT,
+    },
     system::traits::Object,
-    utils::{deque::LocalSSB, machine_context::{PlatformRegisters, registers_from_ucontext}}, offsetof,
+    utils::{
+        deque::LocalSSB,
+        machine_context::{registers_from_ucontext, PlatformRegisters},
+    },
 };
 use crate::{heap::tlab::ThreadLocalAllocBuffer, utils::ptr_queue::PtrQueueImpl};
 
@@ -63,7 +69,6 @@ pub struct Thread {
 }
 
 impl Thread {
-
     pub fn safepoint_offset() -> usize {
         offsetof!(Thread, safepoint)
     }
@@ -132,7 +137,7 @@ impl Thread {
                 (*obj).set_no_heap_ptrs();
             }
             obj.add(1).cast::<T>().write(value);
-            
+
             // We implement black mutator technique and SATB for concurrent marking.
             //
             // This means we collect garbage that was allocated *before* the cycle started
@@ -335,7 +340,7 @@ impl Thread {
     }
 
     #[inline]
-    pub(crate) fn gc_state_set(&mut self, state: i8, old_state: i8) -> i8 {
+    pub unsafe fn gc_state_set(&mut self, state: i8, old_state: i8) -> i8 {
         self.atomic_gc_state().store(state, Ordering::Release);
         if old_state != 0 && state == 0 && !self.safepoint.is_null() {
             self.safepoint();
@@ -345,11 +350,11 @@ impl Thread {
     }
 
     #[inline]
-    pub(crate) fn set_last_sp(&mut self, sp: *mut u8) {
+    pub unsafe fn set_last_sp(&mut self, sp: *mut u8) {
         self.last_sp = sp;
     }
 
-    pub(crate) fn state_save_and_set(&mut self, state: i8) -> i8 {
+    pub unsafe fn state_save_and_set(&mut self, state: i8) -> i8 {
         self.gc_state_set(state, self.gc_state)
     }
 
@@ -409,7 +414,8 @@ impl Thread {
     #[inline(never)]
     #[cold]
     fn enter_conditional(&mut self) {
-        #[cfg(not(windows))] {
+        #[cfg(not(windows))]
+        {
             extern "C" {
                 #[allow(improper_ctypes)]
                 fn getcontext(ctx: *mut libc::ucontext_t) -> i32;
@@ -425,11 +431,11 @@ impl Thread {
                 drop(ctx);
             }
         }
-       
     }
 
     pub(crate) fn save_registers(&mut self) {
-        #[cfg(not(windows))] {
+        #[cfg(not(windows))]
+        {
             extern "C" {
                 #[allow(improper_ctypes)]
                 fn getcontext(ctx: *mut libc::ucontext_t) -> i32;
@@ -481,8 +487,11 @@ impl Thread {
     }
 
     pub fn get_registers(&self) -> (*mut u8, usize) {
-        (self.platform_registers.cast(), size_of::<PlatformRegisters>())
-    } 
+        (
+            self.platform_registers.cast(),
+            size_of::<PlatformRegisters>(),
+        )
+    }
 }
 
 pub struct UnsafeScope {
@@ -497,7 +506,7 @@ impl UnsafeScope {
     /// Returns current state to restore later.
     pub fn new(thread: &'static mut Thread) -> Self {
         Self {
-            state: thread.state_save_and_set(0),
+            state: unsafe { thread.state_save_and_set(0) },
             thread,
         }
     }
@@ -505,54 +514,45 @@ impl UnsafeScope {
 
 impl Drop for UnsafeScope {
     fn drop(&mut self) {
-        self.thread.gc_state_set(self.state, 0);
+        unsafe {
+            self.thread.gc_state_set(self.state, 0);
+        }
     }
 }
 
-pub struct SafeScope<'a> {
-    state: i8,
-    #[cfg(not(windows))]
-    ucontext: Box<libc::ucontext_t>,
-    thread: &'a mut Thread,
-}
+pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R {
+    let mut thread = Thread::current();
+    unsafe {
+        extern "C" {
+            #[allow(improper_ctypes)]
+            fn getcontext(ctx: *mut libc::ucontext_t) -> i32;
+        }
+        let mut ucontext = MaybeUninit::<libc::ucontext_t>::zeroed().assume_init();
 
-impl<'a> SafeScope<'a> {
-    /// Enter safe GC state. This means current thread runs "unmanaged by GC code" and GC does not need to stop this thread
-    /// at GC cycle.
-    ///
-    /// Returns current state to restore later.
-    pub fn new(thread: &'a mut Thread) -> Self {
+        getcontext(&mut ucontext);
+        thread.platform_registers = registers_from_ucontext(&mut ucontext);
+        let state = thread.state_save_and_set(if enter { GC_STATE_SAFE } else { 0 });
+
         thread.set_last_sp(approximate_stack_pointer() as _);
-        let mut this = Self {
-            state: thread.state_save_and_set(GC_STATE_SAFE),
-            thread,
-            #[cfg(not(windows))]
-            ucontext: Box::new(unsafe {
-                MaybeUninit::zeroed().assume_init()
-            })
+        let cb = AssertUnwindSafe(cb);
+        let result = match std::panic::catch_unwind(move || cb()) {
+            Ok(result) => result,
+            Err(err) => {
+                thread.gc_state_set(state, GC_STATE_SAFE);
+                thread.platform_registers = null_mut();
+                std::panic::resume_unwind(err);
+            }
         };
 
-        #[cfg(not(windows))] {
-            extern "C" {
-                #[allow(improper_ctypes)]
-                fn getcontext(ctx: *mut libc::ucontext_t) -> i32;
-            }
-
-            unsafe {
-                getcontext(this.ucontext.as_mut());
-                this.thread.platform_registers = registers_from_ucontext(this.ucontext.as_mut());
-            }
-        }
-
-        this
+        thread.gc_state_set(state, if enter { GC_STATE_SAFE } else { 0 });
+        thread.platform_registers = null_mut();
+        result
     }
 }
 
-impl<'a> Drop for SafeScope<'a> {
-    fn drop(&mut self) {
-        self.thread.gc_state_set(self.state, GC_STATE_SAFE);
-        self.thread.platform_registers = null_mut();
-    }
+
+pub fn safepoint_scope<R>(cb: impl FnOnce() -> R) -> R {
+    safepoint_scope_conditional(true, cb)
 }
 
 static mut SINK: u8 = 0;
@@ -603,19 +603,19 @@ impl Threads {
             (*thread).tlab.retire(std::thread::current().id());
             (*thread).flush_ssb();
             let raw = thread as *mut Thread;
-            let safe_scope = SafeScope::new(thread);
 
-            let mut threads = self.threads.lock(true);
-            threads.retain(|th| {
-                let th = *th;
-                if th == raw {
-                    false
-                } else {
-                    true
-                }
+            safepoint_scope(|| {
+                let mut threads = self.threads.lock(true);
+                threads.retain(|th| {
+                    let th = *th;
+                    if th == raw {
+                        false
+                    } else {
+                        true
+                    }
+                });
             });
 
-            drop(safe_scope);
             thread.safepoint = &mut SINK;
             self.cv_join.notify_all();
         }
@@ -651,10 +651,10 @@ pub fn main_thread(args: HeapArguments, callback: impl FnOnce(&mut Heap) + Unwin
     Thread::current().register();
     let res = std::panic::catch_unwind(|| callback(super::heap::heap()));
 
-    let scope = SafeScope::new(Thread::current());
-    threads().remove_current_thread();
-    threads().join_all();
-    drop(scope);
+    safepoint_scope(|| {
+        threads().remove_current_thread();
+        threads().join_all();
+    });
 
     unsafe {
         heap.stop();
@@ -671,20 +671,20 @@ where
     F: 'static + FnOnce() -> R + Send + UnwindSafe,
     R: 'static + Send,
 {
-    let thread = Thread::current();
-    let scope = SafeScope::new(thread);
-    let join = std::thread::spawn(move || {
-        Thread::current().register();
-        let res = std::panic::catch_unwind(|| cb());
+    let join = safepoint_scope(|| {
+        let join = std::thread::spawn(move || {
+            Thread::current().register();
+            let res = std::panic::catch_unwind(|| cb());
 
-        threads().remove_current_thread();
+            threads().remove_current_thread();
 
-        match res {
-            Ok(val) => val,
-            Err(err) => std::panic::resume_unwind(err),
-        }
+            match res {
+                Ok(val) => val,
+                Err(err) => std::panic::resume_unwind(err),
+            }
+        });
+        join
     });
-    drop(scope);
     GCAwareJoinHandle { join }
 }
 
@@ -694,9 +694,10 @@ pub struct GCAwareJoinHandle<R> {
 
 impl<R> GCAwareJoinHandle<R> {
     pub fn join(self) -> Result<R, Box<dyn Any + Send>> {
-        let scope = SafeScope::new(Thread::current());
-        let res = self.join.join();
-        drop(scope);
+        let res = safepoint_scope(move || {
+            let res = self.join.join();
+            res
+        });
 
         res
     }
@@ -705,7 +706,7 @@ impl<R> GCAwareJoinHandle<R> {
 pub mod scoped {
     use std::{
         marker::PhantomData,
-        panic::{UnwindSafe, AssertUnwindSafe},
+        panic::{AssertUnwindSafe, UnwindSafe},
         sync::{
             atomic::{AtomicBool, AtomicUsize},
             Arc,
@@ -715,7 +716,9 @@ pub mod scoped {
 
     use atomic::Ordering;
 
-    use super::SafeScope;
+    use crate::heap::stack::approximate_stack_pointer;
+
+    use super::GC_STATE_SAFE;
 
     pub struct Scope<'a, 'b> {
         scope: &'a std::thread::Scope<'a, 'b>,
@@ -723,7 +726,8 @@ pub mod scoped {
 
     impl<'a, 'b> Scope<'a, 'b> {
         pub fn spawn<F>(&mut self, cb: F)
-        where F: FnOnce() + Send + 'b,
+        where
+            F: FnOnce() + Send + 'b,
         {
             self.scope.spawn(move || {
                 super::Thread::current().register();
@@ -744,16 +748,21 @@ pub mod scoped {
 
     /// GC-aware [std::thread::scope].
     pub fn scoped(cb: impl FnOnce(&mut Scope)) {
-        let scope = std::thread::scope(|scope| {
+        let thread = super::Thread::current();
+        let mut state = 0;
+        std::thread::scope(|scope| unsafe {
             let mut scope = Scope { scope };
 
             cb(&mut scope);
+
             // enter safepoint here since scoepd threads might not be finished there
             // and when `scope` is dropped, the threads are joined and our thread waits
             // for them to join
-            let safe_scope = SafeScope::new(super::Thread::current());
-            safe_scope
+            thread.last_sp = approximate_stack_pointer() as _;
+            state = thread.state_save_and_set(GC_STATE_SAFE);
         });
-        drop(scope);
+        unsafe {
+            thread.gc_state_set(state, GC_STATE_SAFE);
+        }
     }
 }

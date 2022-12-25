@@ -52,7 +52,6 @@ impl DegeneratedGC {
             mark.cancel(&threads);
             let mark = STWMark::new();
             mark.mark();
-            self.heap.process_weak_refs();
             self.degen_point = DegenPoint::ConcurrentMark;
             self.heap.set_concurrent_mark_in_progress(false);
             drop(phase);

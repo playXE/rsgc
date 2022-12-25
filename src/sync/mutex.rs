@@ -1,6 +1,6 @@
-use crate::heap::{
-    safepoint,
-    thread::{Thread, SafeScope},
+use crate::{
+    heap::{safepoint, thread::Thread},
+    thread::{safepoint_scope, safepoint_scope_conditional},
 };
 use parking_lot::lock_api;
 use parking_lot_core::{
@@ -73,7 +73,6 @@ impl RawMutex {
         }
     }
 
-
     #[inline]
     pub fn lock(&self, safepoint: bool) {
         if self
@@ -126,98 +125,90 @@ impl RawMutex {
     fn lock_slow(&self, timeout: Option<Instant>, safepoint: bool) -> bool {
         let mut spinwait = SpinWait::new();
         let mut state = self.state.load(Ordering::Relaxed);
-        let scope = if safepoint {
-            // enter GC-safe scope when we're trying to lock the mutex
-            // If STW happens GC would not wait for this thread
-            Some(SafeScope::new(Thread::current()))
-        } else {
-            None
-        };
-        loop {
-            // Grab the lock if it isn't locked, even if there is a queue on it
-            if state & LOCKED_BIT == 0 {
-                match self.state.compare_exchange_weak(
-                    state,
-                    state | LOCKED_BIT,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        drop(scope);
-                        return true;
+        safepoint_scope_conditional(safepoint, || {
+            loop {
+                // Grab the lock if it isn't locked, even if there is a queue on it
+                if state & LOCKED_BIT == 0 {
+                    match self.state.compare_exchange_weak(
+                        state,
+                        state | LOCKED_BIT,
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            return true;
+                        }
+                        Err(x) => state = x,
                     }
-                    Err(x) => state = x,
-                }
-                continue;
-            }
-
-            // If there is no queue, try spinning a few times
-            if state & PARKED_BIT == 0 && spinwait.spin() {
-                state = self.state.load(Ordering::Relaxed);
-                continue;
-            }
-
-            // Set the parked bit
-            if state & PARKED_BIT == 0 {
-                if let Err(x) = self.state.compare_exchange_weak(
-                    state,
-                    state | PARKED_BIT,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    state = x;
                     continue;
                 }
+
+                // If there is no queue, try spinning a few times
+                if state & PARKED_BIT == 0 && spinwait.spin() {
+                    state = self.state.load(Ordering::Relaxed);
+                    continue;
+                }
+
+                // Set the parked bit
+                if state & PARKED_BIT == 0 {
+                    if let Err(x) = self.state.compare_exchange_weak(
+                        state,
+                        state | PARKED_BIT,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        state = x;
+                        continue;
+                    }
+                }
+
+                // Park our thread until we are woken up by an unlock
+                let addr = self as *const _ as usize;
+                let validate = || self.state.load(Ordering::Relaxed) == LOCKED_BIT | PARKED_BIT;
+                let before_sleep = || {};
+                let timed_out = |_, was_last_thread| {
+                    // Clear the parked bit if we were the last parked thread
+                    if was_last_thread {
+                        self.state.fetch_and(!PARKED_BIT, Ordering::Relaxed);
+                    }
+                };
+                // SAFETY:
+                //   * `addr` is an address we control.
+                //   * `validate`/`timed_out` does not panic or call into any function of `parking_lot`.
+                //   * `before_sleep` does not call `park`, nor does it panic.
+                match unsafe {
+                    parking_lot_core::park(
+                        addr,
+                        validate,
+                        before_sleep,
+                        timed_out,
+                        DEFAULT_PARK_TOKEN,
+                        timeout,
+                    )
+                } {
+                    // The thread that unparked us passed the lock on to us
+                    // directly without unlocking it.
+                    ParkResult::Unparked(TOKEN_HANDOFF) => {
+                        return true;
+                    }
+
+                    // We were unparked normally, try acquiring the lock again
+                    ParkResult::Unparked(_) => (),
+
+                    // The validation function failed, try locking again
+                    ParkResult::Invalid => (),
+
+                    // Timeout expired
+                    ParkResult::TimedOut => {
+                        return false;
+                    }
+                }
+
+                // Loop back and try locking again
+                spinwait.reset();
+                state = self.state.load(Ordering::Relaxed);
             }
-
-            // Park our thread until we are woken up by an unlock
-            let addr = self as *const _ as usize;
-            let validate = || self.state.load(Ordering::Relaxed) == LOCKED_BIT | PARKED_BIT;
-            let before_sleep = || {};
-            let timed_out = |_, was_last_thread| {
-                // Clear the parked bit if we were the last parked thread
-                if was_last_thread {
-                    self.state.fetch_and(!PARKED_BIT, Ordering::Relaxed);
-                }
-            };
-            // SAFETY:
-            //   * `addr` is an address we control.
-            //   * `validate`/`timed_out` does not panic or call into any function of `parking_lot`.
-            //   * `before_sleep` does not call `park`, nor does it panic.
-            match unsafe {
-                parking_lot_core::park(
-                    addr,
-                    validate,
-                    before_sleep,
-                    timed_out,
-                    DEFAULT_PARK_TOKEN,
-                    timeout,
-                )
-            } {
-                // The thread that unparked us passed the lock on to us
-                // directly without unlocking it.
-                ParkResult::Unparked(TOKEN_HANDOFF) => {
-                    drop(scope);
-                    return true;
-                }
-
-                // We were unparked normally, try acquiring the lock again
-                ParkResult::Unparked(_) => (),
-
-                // The validation function failed, try locking again
-                ParkResult::Invalid => (),
-
-                // Timeout expired
-                ParkResult::TimedOut => {
-                    drop(scope);
-                    return false;
-                }
-            }
-
-            // Loop back and try locking again
-            spinwait.reset();
-            state = self.state.load(Ordering::Relaxed);
-        }
+        })
     }
 
     #[cold]
@@ -298,15 +289,12 @@ unsafe impl<T: ?Sized> Send for Mutex<T> {}
 unsafe impl<T: ?Sized> Sync for Mutex<T> {}
 
 impl<T: ?Sized> Mutex<T> {
-
     pub unsafe fn unsafe_get(&self) -> &T {
         &*self.data.get()
     }
 
     pub fn get_mut(&mut self) -> &mut T {
-        unsafe {
-            &mut *self.data.get()
-        }
+        unsafe { &mut *self.data.get() }
     }
 
     #[inline]
@@ -337,9 +325,7 @@ impl<T: ?Sized> Mutex<T> {
     #[inline]
     pub fn lock(&self, safepoint: bool) -> MutexGuard<'_, T> {
         self.raw.lock(safepoint);
-        unsafe {
-            self.guard(safepoint)
-        }
+        unsafe { self.guard(safepoint) }
     }
 
     /// Attempts to acquire this lock.
@@ -359,7 +345,6 @@ impl<T: ?Sized> Mutex<T> {
         }
     }
 
-
     /// # Safety
     ///
     /// The lock must be held when calling this method.
@@ -367,7 +352,7 @@ impl<T: ?Sized> Mutex<T> {
     unsafe fn guard(&self, safepoint: bool) -> MutexGuard<'_, T> {
         MutexGuard {
             mutex: self,
-            safepoint
+            safepoint,
         }
     }
 }
@@ -389,7 +374,6 @@ impl<'a, T: ?Sized> MutexGuard<'a, T> {
     {
         // Safety: A MutexGuard always holds the lock.
         s.mutex.raw.unlock();
-        
 
         let r = f();
         s.mutex.raw.lock(s.safepoint);
@@ -639,70 +623,69 @@ impl Condvar {
         mutex: &RawMutex,
         timeout: Option<Instant>,
     ) -> WaitTimeoutResult {
-        let result;
+        let mut result = ParkResult::Invalid;
         let mut bad_mutex = false;
         let mut requeued = false;
-        let safe_scope = SafeScope::new(Thread::current());
-        {
-            let addr = self as *const _ as usize;
-            let lock_addr = mutex as *const _ as *mut _;
-            let validate = || {
-                // Ensure we don't use two different mutexes with the same
-                // Condvar at the same time. This is done while locked to
-                // avoid races with notify_one
-                let state = self.state.load(Ordering::Relaxed);
-                if state.is_null() {
-                    self.state.store(lock_addr, Ordering::Relaxed);
-                } else if state != lock_addr {
-                    bad_mutex = true;
-                    return false;
-                }
-                true
-            };
-            let before_sleep = || {
-                // Unlock the mutex before sleeping...
-                mutex.unlock();
-            };
-            let timed_out = |k, was_last_thread| {
-                // If we were requeued to a mutex, then we did not time out.
-                // We'll just park ourselves on the mutex again when we try
-                // to lock it later.
-                requeued = k != addr;
+        safepoint_scope_conditional(safepoint, || {
+            {
+                let addr = self as *const _ as usize;
+                let lock_addr = mutex as *const _ as *mut _;
+                let validate = || {
+                    // Ensure we don't use two different mutexes with the same
+                    // Condvar at the same time. This is done while locked to
+                    // avoid races with notify_one
+                    let state = self.state.load(Ordering::Relaxed);
+                    if state.is_null() {
+                        self.state.store(lock_addr, Ordering::Relaxed);
+                    } else if state != lock_addr {
+                        bad_mutex = true;
+                        return false;
+                    }
+                    true
+                };
+                let before_sleep = || {
+                    // Unlock the mutex before sleeping...
+                    mutex.unlock();
+                };
+                let timed_out = |k, was_last_thread| {
+                    // If we were requeued to a mutex, then we did not time out.
+                    // We'll just park ourselves on the mutex again when we try
+                    // to lock it later.
+                    requeued = k != addr;
 
-                // If we were the last thread on the queue then we need to
-                // clear our state. This is normally done by the
-                // notify_{one,all} functions when not timing out.
-                if !requeued && was_last_thread {
-                    self.state.store(ptr::null_mut(), Ordering::Relaxed);
-                }
-            };
-            result = unsafe {
-                parking_lot_core::park(
-                    addr,
-                    validate,
-                    before_sleep,
-                    timed_out,
-                    DEFAULT_PARK_TOKEN,
-                    timeout,
-                )
-            };
-        }
+                    // If we were the last thread on the queue then we need to
+                    // clear our state. This is normally done by the
+                    // notify_{one,all} functions when not timing out.
+                    if !requeued && was_last_thread {
+                        self.state.store(ptr::null_mut(), Ordering::Relaxed);
+                    }
+                };
+                result = unsafe {
+                    parking_lot_core::park(
+                        addr,
+                        validate,
+                        before_sleep,
+                        timed_out,
+                        DEFAULT_PARK_TOKEN,
+                        timeout,
+                    )
+                };
+            }
 
-        // Panic if we tried to use multiple mutexes with a Condvar. Note
-        // that at this point the MutexGuard is still locked. It will be
-        // unlocked by the unwinding logic.
-        if bad_mutex {
-            panic!("attempted to use a condition variable with more than one mutex");
-        }
+            // Panic if we tried to use multiple mutexes with a Condvar. Note
+            // that at this point the MutexGuard is still locked. It will be
+            // unlocked by the unwinding logic.
+            if bad_mutex {
+                panic!("attempted to use a condition variable with more than one mutex");
+            }
 
-        // ... and re-lock it once we are done sleeping
-        if result == ParkResult::Unparked(TOKEN_HANDOFF) {
-            unsafe { deadlock::acquire_resource(mutex as *const _ as usize) };
-        } else {
-            mutex.lock(safepoint);
-        }
-
-        drop(safe_scope);
+            // ... and re-lock it once we are done sleeping
+            if result == ParkResult::Unparked(TOKEN_HANDOFF) {
+                unsafe { deadlock::acquire_resource(mutex as *const _ as usize) };
+            } else {
+                mutex.lock(safepoint);
+            }
+        });
 
         WaitTimeoutResult(!(result.is_unparked() || requeued))
     }
@@ -871,6 +854,8 @@ pub fn to_deadline(timeout: Duration) -> Option<Instant> {
 
 impl<'a, T: ?Sized> Drop for MutexGuard<'a, T> {
     fn drop(&mut self) {
-        unsafe { self.mutex.raw().unlock(); }
+        unsafe {
+            self.mutex.raw().unlock();
+        }
     }
 }

@@ -611,16 +611,14 @@ mod os {
 
 pub use os::Sem;
 
-use crate::heap::thread::{Thread, SafeScope};
+use crate::{heap::thread::{Thread, }, thread::safepoint_scope};
 
 impl Sem {
     #[inline]
     pub fn wait_with_safepoint_check(&self) {
         // Prepare to block and allow safepoints while blocked
-        let thread = Thread::current();
-
-        let scope = SafeScope::new(thread);
-        self.wait();
-        drop(scope);
+        safepoint_scope(|| {
+            self.wait()
+        });
     }
 }

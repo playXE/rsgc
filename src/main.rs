@@ -3,7 +3,6 @@ use std::sync::Arc;
 use rsgc::{
     env::read_uint_from_env,
     heap::{region::HeapArguments, thread::Thread},
-    keep_on_stack,
     system::object::{Allocation, Handle},
     system::traits::Object,
 };
@@ -110,7 +109,6 @@ fn bench_parallel() {
                 for _ in 1..=iterations {
                     thread.safepoint();
                     let tree_node = create_tree(thread, depth as _);
-                    keep_on_stack(&tree_node);
                     check += tree_node.as_ref().check_tree();
                 }
 

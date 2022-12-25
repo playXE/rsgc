@@ -95,13 +95,3 @@ macro_rules! offsetof {
 }
 
 pub use heap::thread;
-
-static mut SINK2: usize = 0;
-
-pub fn keep_on_stack<T>(var: &T) {
-    unsafe {
-        let sink_ptr = &mut SINK2 as *mut usize;
-
-        sink_ptr.write_volatile(var as *const T as usize);
-    }
-}

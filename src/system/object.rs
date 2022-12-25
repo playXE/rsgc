@@ -1,11 +1,13 @@
 use core::fmt;
 use std::{
     any::{Any, TypeId},
+    borrow::BorrowMut,
+    hash::{Hash, Hasher},
     marker::PhantomData,
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
-    sync::atomic::{AtomicPtr, AtomicU64}, hash::{Hash, Hasher}, borrow::BorrowMut,
+    sync::atomic::{AtomicPtr, AtomicU64},
 };
 
 use atomic::Ordering;
@@ -439,6 +441,10 @@ impl<T: Object + ?Sized> Handle<T> {
         }
     }
 
+    #[inline]
+    pub fn is<U: Object + ?Sized + 'static>(&self) -> bool {
+        self.vtable().type_id == TypeId::of::<U>()
+    }
 }
 
 impl Handle<dyn Object> {
@@ -490,8 +496,6 @@ impl<T: Allocation + Object> Allocation for MaybeUninit<T> {
 impl<T: Object + ?Sized> Allocation for Handle<T> {
     const NO_HEAP_PTRS: bool = false;
 }
-
-
 
 impl<T: Object + Sized> Deref for Handle<T> {
     type Target = T;

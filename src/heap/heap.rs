@@ -11,10 +11,10 @@ use std::{
 use crate::{
     formatted_size,
     heap::{root_processor::RootTask, safepoint::SafepointSynchronize},
-    system::{object::HeapObjectHeader},
     sync::{suspendible_thread_set::SuspendibleThreadSet, worker_threads::WorkerThreads},
-    thread::threads,
+    system::object::HeapObjectHeader,
     system::traits::{Visitor, WeakProcessor},
+    thread::{safepoint_scope, threads},
 };
 
 use super::{
@@ -32,7 +32,7 @@ use super::{
     root_processor::{Root, RootSet, SimpleRoot},
     safepoint,
     shared_vars::{SharedEnumFlag, SharedFlag},
-    thread::{SafeScope, Thread},
+    thread::Thread,
     virtual_memory::{self, page_size, PlatformVirtualMemory, VirtualMemory, VirtualMemoryImpl},
     AllocRequest, GCHeuristic,
 };
@@ -64,9 +64,8 @@ pub struct Heap {
     progress_last_gc: SharedFlag,
     object_start_bitmap: HeapBitmap<16>,
     heuristics: Box<dyn Heuristics>,
-    weak_refs: Vec<*mut HeapObjectHeader>,
     root_set: RootSet,
-    scoped_pool: scoped_thread_pool::Pool,
+    scoped_pool: Pool,
     cancelled_gc: SharedEnumFlag,
 }
 
@@ -79,11 +78,11 @@ impl Heap {
         &mut self.opts
     }
 
-    pub fn free_set(&self) -> &RegionFreeSet {
+    pub(crate) fn free_set(&self) -> &RegionFreeSet {
         &self.free_set
     }
 
-    pub fn free_set_mut(&mut self) -> &mut RegionFreeSet {
+    pub(crate) fn free_set_mut(&mut self) -> &mut RegionFreeSet {
         &mut self.free_set
     }
 
@@ -99,7 +98,7 @@ impl Heap {
         self.is_concurrent_mark_in_progress.is_set()
     }
 
-    pub fn set_concurrent_mark_in_progress(&self, value: bool) {
+    pub(crate) fn set_concurrent_mark_in_progress(&self, value: bool) {
         if value {
             self.is_concurrent_mark_in_progress.set();
         } else {
@@ -145,13 +144,8 @@ impl Heap {
 
         let size = align_usize(opts.region_count * size_of::<HeapRegion>(), page_size());
 
-        let regions_mem = VirtualMemory::allocate_aligned(
-            size,
-            virtual_memory::page_size(),
-            false,
-            "heap regions",
-        )
-        .unwrap();
+        let regions_mem =
+            VirtualMemory::allocate_aligned(size, page_size(), false, "heap regions").unwrap();
         let free_set = RegionFreeSet::new(&opts);
 
         let heuristics = match heuristics {
@@ -179,9 +173,8 @@ impl Heap {
             last_cycle_end: Instant::now(),
             controller_thread: None,
             progress_last_gc: SharedFlag::new(),
-            weak_refs: vec![],
             root_set: RootSet::new(),
-            scoped_pool: scoped_thread_pool::Pool::new(opts.parallel_gc_threads),
+            scoped_pool: Pool::new(opts.parallel_gc_threads),
             marking_context: mark_ctx,
             cancelled_gc: SharedEnumFlag::new(),
         }));
@@ -196,8 +189,6 @@ impl Heap {
                 this.regions[i] = region;
             }
         }
-
-        
 
         this.free_set.set_heap(ptr);
         this.free_set.rebuild();
@@ -221,7 +212,7 @@ impl Heap {
         self.minimum_size
     }
 
-    pub fn entry_uncommit(&mut self, shrink_before: Instant, shrink_until: usize) {
+    pub(crate) fn entry_uncommit(&mut self, shrink_before: Instant, shrink_until: usize) {
         // Application allocates from the beginning of the heap.
         // It is more efficient to uncommit from the end, so that applications
         // could enjoy the near committed regions.
@@ -252,21 +243,19 @@ impl Heap {
         }
     }
 
-    pub fn increase_commited(&self, bytes: usize) {
-        self.commited
-            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn increase_commited(&self, bytes: usize) {
+        self.commited.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub fn decrease_commited(&self, bytes: usize) {
-        self.commited
-            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn decrease_commited(&self, bytes: usize) {
+        self.commited.fetch_sub(bytes, Ordering::Relaxed);
     }
 
     pub fn get_commited(&self) -> usize {
-        self.commited.load(std::sync::atomic::Ordering::Relaxed)
+        self.commited.load(Ordering::Relaxed)
     }
 
-    pub fn controller_thread<'a>(&'a self) -> &'a ControlThread {
+    pub(crate) fn controller_thread(&self) -> &ControlThread {
         self.controller_thread.as_ref().unwrap()
     }
 
@@ -274,44 +263,42 @@ impl Heap {
         &self.object_start_bitmap
     }
 
-    pub fn object_start_bitmap_mut(&mut self) -> &mut HeapBitmap<16> {
+    pub unsafe fn object_start_bitmap_mut(&mut self) -> &mut HeapBitmap<16> {
         &mut self.object_start_bitmap
     }
 
-    pub fn increase_used(&self, bytes: usize) {
-        self.used
-            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn increase_used(&self, bytes: usize) {
+        self.used.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub fn decrease_used(&self, bytes: usize) {
-        self.used
-            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn decrease_used(&self, bytes: usize) {
+        self.used.fetch_sub(bytes, Ordering::Relaxed);
     }
 
-    pub fn set_used(&self, bytes: usize) {
-        self.used.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn set_used(&self, bytes: usize) {
+        self.used.store(bytes, Ordering::Relaxed);
     }
 
-    pub fn increase_allocated(&self, bytes: usize) {
+    pub(crate) fn increase_allocated(&self, bytes: usize) {
         self.bytes_allocated_since_gc_start
-            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub fn decrease_allocated(&self, bytes: usize) {
+    pub(crate) fn decrease_allocated(&self, bytes: usize) {
         self.bytes_allocated_since_gc_start
-            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+            .fetch_sub(bytes, Ordering::Relaxed);
     }
 
-    pub fn set_allocated(&self, bytes: usize) {
+    pub(crate) fn set_allocated(&self, bytes: usize) {
         self.bytes_allocated_since_gc_start
-            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+            .store(bytes, Ordering::Relaxed);
     }
 
     pub fn request_gc(&self) {
         self.controller_thread().handle_requested_gc();
     }
 
-    pub fn notify_mutator_alloc(&self, bytes: usize, waste: bool) {
+    pub(crate) fn notify_mutator_alloc(&self, bytes: usize, waste: bool) {
         if !waste {
             //self.increase_used(bytes);
         }
@@ -323,11 +310,11 @@ impl Heap {
         self.bytes_allocated_since_gc_start.load(Ordering::Relaxed)
     }
 
-    pub fn notify_gc_progress(&self) {
+    pub(crate) fn notify_gc_progress(&self) {
         self.progress_last_gc.set();
     }
 
-    pub fn notify_no_gc_progress(&self) {
+    pub(crate) fn notify_no_gc_progress(&self) {
         self.progress_last_gc.unset();
     }
 
@@ -348,21 +335,13 @@ impl Heap {
         self.opts.region_count
     }
 
-    pub fn get_region(&self, index: usize) -> *mut HeapRegion {
+    pub(crate) fn get_region(&self, index: usize) -> *mut HeapRegion {
         self.regions[index]
     }
 
-    pub fn add_global_root(&mut self, root: impl Root + 'static) {
+    pub fn add_root(&mut self, root: impl Root + 'static) {
         self.lock.lock();
         self.root_set.add_root(Arc::new(root));
-        unsafe {
-            self.lock.unlock();
-        }
-    }
-
-    pub fn add_weak_ref(&mut self, weak_ref: *mut HeapObjectHeader) {
-        self.lock.lock();
-        self.weak_refs.push(weak_ref);
         unsafe {
             self.lock.unlock();
         }
@@ -376,37 +355,6 @@ impl Heap {
             .for_each(|vis| cb(*vis));
 
         cb(heap().marking_context);
-    }
-
-    pub unsafe fn process_weak_refs(&mut self) {
-        struct SimpleWeakProcessor {}
-
-        impl WeakProcessor for SimpleWeakProcessor {
-            fn process(&mut self, object: *const u8) -> *const u8 {
-                let header =
-                    (object as usize - size_of::<HeapObjectHeader>()) as *const HeapObjectHeader;
-                unsafe {
-                    if (*header).is_marked() {
-                        header.add(1) as _
-                    } else {
-                        null_mut()
-                    }
-                }
-            }
-        }
-
-        self.weak_refs.retain(|obj| {
-            let obj = *obj;
-            if !(*obj).is_marked() {
-                return false;
-            }
-
-            let vt = (*obj).vtable();
-
-            (vt.weak_process)(obj.add(1).cast(), &mut SimpleWeakProcessor {});
-
-            true
-        })
     }
 
     pub fn process_cards(&mut self, clear: bool) {
@@ -438,11 +386,11 @@ impl Heap {
         }
     }
 
-    pub fn heuristics(&self) -> &dyn Heuristics {
+    pub(crate) fn heuristics(&self) -> &dyn Heuristics {
         &*self.heuristics
     }
 
-    pub fn heuristics_mut(&mut self) -> &mut dyn Heuristics {
+    pub(crate) fn heuristics_mut(&mut self) -> &mut dyn Heuristics {
         &mut *self.heuristics
     }
 
@@ -467,11 +415,11 @@ impl Heap {
         &self.marking_context
     }
 
-    pub fn marking_context_mut(&mut self) -> &mut MarkingContext {
+    pub(crate) fn marking_context_mut(&mut self) -> &mut MarkingContext {
         &mut self.marking_context
     }
 
-    pub fn allocate_memory(&mut self, req: &mut AllocRequest) -> *mut u8 {
+    pub(crate) fn allocate_memory(&mut self, req: &mut AllocRequest) -> *mut u8 {
         let mut in_new_region = false;
         let mut result;
 
@@ -521,19 +469,19 @@ impl Heap {
         result
     }
 
-    pub fn rebuild_free_set(&mut self, concurrent: bool) {
+    pub(crate) fn rebuild_free_set(&mut self, concurrent: bool) {
         let _ = concurrent;
         self.free_set.rebuild();
     }
 
-    pub fn heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
+    pub unsafe fn heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
         for i in 0..self.num_regions() {
             let current = self.get_region(i);
             blk.heap_region_do(current);
         }
     }
 
-    pub fn parallel_heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
+    pub unsafe fn parallel_heap_region_iterate(&self, blk: &dyn HeapRegionClosure) {
         if self.num_regions() > self.options().parallel_region_stride
             && self.scoped_pool.workers() != 0
         {
@@ -549,7 +497,10 @@ impl Heap {
         }
     }
 
-    pub fn parallel_heap_region_iterate_with_cancellation(&self, blk: &dyn HeapRegionClosure) {
+    pub(crate) unsafe fn parallel_heap_region_iterate_with_cancellation(
+        &self,
+        blk: &dyn HeapRegionClosure,
+    ) {
         if self.num_regions() > self.options().parallel_region_stride
             && self.scoped_pool.workers() != 0
         {
@@ -628,11 +579,11 @@ impl Heap {
         }
     }
 
-    pub fn prepare_gc(&mut self) {
+    pub(crate) fn prepare_gc(&mut self) {
         self.reset_mark_bitmap();
     }
 
-    pub fn reset_mark_bitmap(&mut self) {
+    pub(crate) fn reset_mark_bitmap(&mut self) {
         //self.marking_context.flip_mark_bit();
         self.marking_context.clear_bitmap_full();
     }
@@ -711,9 +662,9 @@ impl Heap {
             if thread.is_registered() {
                 // We need to provide a safepoint here, otherwise we might
                 // spin forever if a SP is pending.
-                let scope = SafeScope::new(thread);
-                std::hint::spin_loop();
-                drop(scope);
+                safepoint_scope(|| {
+                    std::hint::spin_loop();
+                });
             }
         }
     }
@@ -722,7 +673,7 @@ impl Heap {
         self.try_cancel_gc();
     }
 
-    pub fn cancelled_gc_address(&self) -> *const AtomicU8 {
+    pub(crate) fn cancelled_gc_address(&self) -> *const AtomicU8 {
         self.cancelled_gc.addr_of()
     }
 
@@ -730,7 +681,7 @@ impl Heap {
         self.cancelled_gc.get() == GC_CANCELLED
     }
 
-    pub fn check_cancelled_gc_and_yield(&self, sts_active: bool) -> bool {
+    pub(crate) fn check_cancelled_gc_and_yield(&self, sts_active: bool) -> bool {
         if !sts_active {
             return self.cancelled_gc();
         }
@@ -754,16 +705,16 @@ impl Heap {
         self.cancelled_gc.set(GC_CANCELLABLE);
     }
 
-    pub fn safepoint_synchronize_begin(&self) {
+    pub(crate) fn safepoint_synchronize_begin(&self) {
         SuspendibleThreadSet::synchronize();
     }
 
-    pub fn safepoint_synchronize_end(&self) {
+    pub(crate) fn safepoint_synchronize_end(&self) {
         SuspendibleThreadSet::desynchronize();
     }
 
     pub fn add_core_root_set(&mut self) {
-        self.add_global_root(SimpleRoot::new(
+        self.add_root(SimpleRoot::new(
             "Conservative roots",
             "CS",
             |processor| unsafe {
@@ -790,7 +741,9 @@ impl Heap {
                                 (stack_end as usize - stack_start as usize) / size_of::<usize>(),
                             );
                             let (regs, size) = (*thread).get_registers();
-                            processor.visitor().visit_conservative(regs.cast(), size);
+                            if !regs.is_null() && size != 0 {
+                                processor.visitor().visit_conservative(regs.cast(), size);
+                            }
                         },
                         false,
                     );

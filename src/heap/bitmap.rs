@@ -15,7 +15,6 @@ pub struct HeapBitmap<const ALIGN: usize> {
 }
 
 impl<const ALIGN: usize> HeapBitmap<ALIGN> {
-
     pub fn offset_offset() -> usize {
         offsetof!(Self, offset)
     }

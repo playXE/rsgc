@@ -189,11 +189,13 @@ impl ConcMark {
 
         let _heap = heap();
         let has_work = AtomicBool::new(false);
-        _heap.parallel_heap_region_iterate(&ScanCardsForRegionsTask {
-            heap: heap(),
-            minimum_age,
-            has_work: &has_work,
-        });
+        unsafe {
+            _heap.parallel_heap_region_iterate(&ScanCardsForRegionsTask {
+                heap: heap(),
+                minimum_age,
+                has_work: &has_work,
+            });
+        }
 
         if clear {
             _heap
