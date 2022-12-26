@@ -489,7 +489,7 @@ impl Thread {
     pub fn get_registers(&self) -> (*mut u8, usize) {
         (
             self.platform_registers.cast(),
-            size_of::<PlatformRegisters>(),
+            size_of::<PlatformRegisters>() / size_of::<usize>(),
         )
     }
 }

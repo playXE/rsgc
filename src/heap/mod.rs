@@ -219,8 +219,7 @@ impl DynBitmap {
 
     pub fn clear(&mut self) {
         unsafe {
-            self.buffer.fill(0);
-            //sloppy_memset::sloppy_memset(self.buffer.as_mut_ptr(), 0, self.buffer.len());
+            sloppy_memset::sloppy_memset(self.buffer.as_mut_ptr(), 0, self.buffer.len());
         }
     }
 
