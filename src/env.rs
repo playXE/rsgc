@@ -67,7 +67,7 @@ cfg_if::cfg_if! {
 fn get_total_memory_linux(_filename: &str) -> usize {
     
     #[cfg(target_os="linux")]
-    {
+    unsafe {
         libc::sysconf(libc::_SC_PHYS_PAGES) as usize * libc::sysconf(libc::_SC_PAGESIZE) as usize 
     } 
     #[cfg(not(target_os="linux"))]

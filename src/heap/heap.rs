@@ -638,6 +638,9 @@ impl Heap {
     }
 
     pub unsafe fn stop(&mut self) {
+        self.cancel_gc();
+        self.controller_thread.as_mut().unwrap().stop();
+        let _ = unsafe { Box::from_raw(self.controller_thread.take().unwrap()) };
         let _ = Box::from_raw(self as *mut Self);
         log::debug!("Heap stopped");
         INIT.store(false, Ordering::Release);
@@ -789,10 +792,7 @@ pub trait HeapRegionClosure: Send + Sync {
 
 impl Drop for Heap {
     fn drop(&mut self) {
-        self.cancel_gc();
-        self.controller_thread.as_mut().unwrap().stop();
         let _ = unsafe { Box::from_raw(self.marking_context) };
-        let _ = unsafe { Box::from_raw(self.controller_thread.as_mut().unwrap()) };
     }
 }
 
