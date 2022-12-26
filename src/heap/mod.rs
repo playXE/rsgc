@@ -2,8 +2,6 @@ use std::time::Instant;
 
 use atomic::{Atomic, Ordering};
 
-use crate::utils::sloppy_memset;
-
 use self::heap::heap;
 
 pub mod bitmap;
@@ -218,9 +216,7 @@ impl DynBitmap {
     }
 
     pub fn clear(&mut self) {
-        unsafe {
-            sloppy_memset::sloppy_memset(self.buffer.as_mut_ptr(), 0, self.buffer.len());
-        }
+        self.buffer.fill(0); // TODO: Can't use sloppy_memset here??
     }
 
     pub fn count_ones(&self) -> usize {
