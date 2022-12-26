@@ -75,7 +75,7 @@ fn get_total_memory_linux(filename: &str) -> usize {
                     parts.next();
                     if let Some(value) = parts.next() {
                         if let Ok(value) = value.parse::<i64>() {
-                            result = value * 1024;
+                            result = value / 1024 / 1024;
                         }
                     }
                 }
