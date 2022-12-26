@@ -68,7 +68,7 @@ fn get_total_memory_linux(_filename: &str) -> usize {
     
     #[cfg(target_os="linux")]
     {
-        libc::sysconf(libc::_SC_PHYS_PAGES) * libc::sysconf(_libc::_SC_PAGESIZE) as usize 
+        libc::sysconf(libc::_SC_PHYS_PAGES) as usize * libc::sysconf(_libc::_SC_PAGESIZE) as usize 
     } 
     #[cfg(not(target_os="linux"))]
     {
