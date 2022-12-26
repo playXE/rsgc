@@ -129,13 +129,20 @@ impl Heap {
         let num_min_regions = min_byte_size / opts.region_size_bytes;
         let minimum_size = num_min_regions * opts.region_size_bytes;
 
-        let mem = VirtualMemory::<PlatformVirtualMemory>::reserve(
+        let mem = VirtualMemory::<PlatformVirtualMemory>::allocate_aligned(
             opts.max_heap_size,
             opts.region_size_bytes,
+            false,
+            "heap",
         )
         .unwrap();
 
-        PlatformVirtualMemory::commit(mem.address(), initial_size);
+        unsafe {
+            let uncommit_start = mem.address().add(initial_size);
+            let uncommit_size = mem.size() - initial_size;
+            PlatformVirtualMemory::decommit(uncommit_start, uncommit_size);
+        }
+        //PlatformVirtualMemory::commit(mem.address(), initial_size);
 
         let mark_ctx = Box::leak(Box::new(MarkingContext::new(
             MemoryRegion::new(mem.start() as _, mem.size()),

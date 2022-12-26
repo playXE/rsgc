@@ -458,14 +458,14 @@ pub mod posix {
             assert!(is_aligned(size, VirtualMemory::<Self>::page_size(), 0));
             assert!(is_power_of_two(alignment));
             assert!(is_aligned(alignment, VirtualMemory::<Self>::page_size(), 0));
-
+            let allocated_size = size + alignment - VirtualMemory::<Self>::page_size();
             let address = unsafe {
                 generic_map_aligned(
                     null_mut(),
                     libc::PROT_NONE,
                     size as _,
                     alignment as _,
-                    size as _,
+                    allocated_size as _,
                     libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 )
             };
