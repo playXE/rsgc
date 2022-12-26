@@ -12,6 +12,9 @@ Semi-conservative Mark&Sweep Garbage Collector inspired by Shenandoah for Rust w
 - Concurrent
 - Multi-threaded
 
+# Benchmarks
+
+To run benchmarks you need .NET and Java installed, enter `benchmarks/binarytrees` directory and run `make`.
 
 # Architecture
 

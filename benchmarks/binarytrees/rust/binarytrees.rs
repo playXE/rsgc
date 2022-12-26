@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use rsgc::{
-    env::read_uint_from_env,
     heap::{region::HeapArguments, thread::Thread},
     system::object::{Allocation, Handle},
     system::traits::Object,
@@ -44,17 +43,16 @@ impl TreeNode {
 fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
     thread.safepoint();
     let node = if 0 < depth {
-        let node = TreeNode {
+        let mut node = TreeNode {
             item: 0,
             left: None,
             right: None,
         };
-        let mut node = thread.allocate_fixed(node);
-        //thread.write_barrier(node);
-        node.as_mut().left = Some(create_tree(thread, depth - 1));
-        node.as_mut().right = Some(create_tree(thread, depth - 1));
 
-        node
+        node.left = Some(create_tree(thread, depth - 1));
+        node.right = Some(create_tree(thread, depth - 1));
+
+        thread.allocate_fixed(node)
     } else {
         let node = TreeNode {
             item: 0,
@@ -69,11 +67,19 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
 }
 
 fn bench_parallel() {
+
+    let mut n = 0;
+    if let Some(arg) = std::env::args().skip(1).next() {
+        if let Ok(x) = arg.parse::<usize>() {
+            n = x;
+        }
+    }
+
     let min_depth = 4;
-    let max_depth = match read_uint_from_env("TREE_DEPTH") {
-        Some(x) if x < min_depth + 2 => min_depth + 2,
-        Some(x) => x,
-        _ => 21,
+    let max_depth = if n < (min_depth + 2) {
+        min_depth + 2
+    } else {
+        n 
     };
 
     let start = std::time::Instant::now();
@@ -96,7 +102,6 @@ fn bench_parallel() {
             .map(|_| Mutex::new(String::new()))
             .collect::<Vec<_>>(),
     );
-    //let safe_scope = SafeScope::new(rsgc::heap::thread::thread());
     rsgc::thread::scoped::scoped(|scope| {
         let mut d = min_depth;
 
@@ -108,7 +113,6 @@ fn bench_parallel() {
                 let iterations = 1 << (max_depth - depth + min_depth);
                 let mut check = 0;
                 for _ in 1..=iterations {
-                    //thread.safepoint();
                     let tree_node = create_tree(thread, depth as _);
                     check += tree_node.as_ref().check_tree();
                 }
@@ -122,7 +126,6 @@ fn bench_parallel() {
             d += 2;
         }
     });
-    //drop(safe_scope);
     for result in results.iter() {
         println!("{}", *result.lock());
     }
@@ -133,13 +136,12 @@ fn bench_parallel() {
     );
 
     println!(
-        "binary trees took: {:03} secs",
-        start.elapsed().as_micros() as f64 / 1000.0 / 1000.0
+        "time: {}ms",
+        start.elapsed().as_millis()
     );
 }
 
 fn main() {
-    env_logger::init();
     let args = HeapArguments::from_env();
 
     rsgc::thread::main_thread(args, |heap| {

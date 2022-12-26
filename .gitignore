@@ -1,1 +1,5 @@
 /target
+/benchmarks/binarytrees/csharp/bin 
+/benchmarks/binarytrees/csharp/obj
+/benchmarks/binarytrees/java/binarytrees*.class
+/benchmarks/binarytrees/rust/target
