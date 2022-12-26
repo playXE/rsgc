@@ -64,36 +64,15 @@ cfg_if::cfg_if! {
     }
 }
 
-fn get_total_memory_linux(filename: &str) -> usize {
-    let mut result = -1;
-
-    match std::fs::read_to_string(filename) {
-        Ok(content) => {
-            for line in content.lines() {
-                if line.starts_with("MemTotal:") {
-                    let mut parts = line.split_whitespace();
-                    parts.next();
-                    if let Some(value) = parts.next() {
-                        if let Ok(value) = value.parse::<i64>() {
-                            result = value / 1024 / 1024;
-                        }
-                    }
-                }
-            }
-        }
-        _ => {
-
-        }
-    }
-
-    if result < 0 {
+fn get_total_memory_linux(_filename: &str) -> usize {
+    
+    #[cfg(target_os="linux")]
+    {
+        libc::sysconf(libc::_SC_PHYS_PAGES) * libc::sysconf(_libc::_SC_PAGESIZE) as usize 
+    } 
+    #[cfg(not(target_os="linux"))]
+    {
         ADRESSABLE_SIZE
-    } else {
-        if result as usize > ADRESSABLE_SIZE {
-            ADRESSABLE_SIZE
-        } else {
-            result as _
-        }
     }
 }
 
