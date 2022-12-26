@@ -31,7 +31,7 @@ cfg_if::cfg_if! {
                     if #[cfg(target_os="openbsd")] {
                         ucontext.cast()
                     } else {
-                        &mut (*ucontext).uc_mcontext as *mut PlatformRegisters
+                        &mut (*ucontext).uc_mcontext as *mut libc::mcontext_t as *mut PlatformRegisters
                     }
                 }
                 

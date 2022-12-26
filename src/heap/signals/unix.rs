@@ -1,4 +1,4 @@
-use std::ptr::null_mut;
+use std::{ptr::null_mut, mem::MaybeUninit};
 
 use libc::*;
 
@@ -8,7 +8,7 @@ use crate::{
 };
 
 unsafe extern "C" fn sigdie_handler(sig: i32, _info: *mut siginfo_t, _context: *mut c_void) {
-    let mut sset = 0;
+    let mut sset = MaybeUninit::<libc::sigset_t>::zeroed().assume_init();
     sigfillset(&mut sset);
     sigprocmask(SIG_UNBLOCK, &mut sset, null_mut());
     signal(sig, SIG_DFL);
@@ -83,6 +83,7 @@ unsafe fn get_sp_from_ucontext(uc: *mut ucontext_t) -> *mut () {
                 (*(*uc).uc_mcontext).__ss.__esp as _
             }
         } else {
+            let _ = uc;
             // Darwin has the sanest ucontext_t impl, others don't so we use our own code
             approximate_stack_pointer() as _
         }

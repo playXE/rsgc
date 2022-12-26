@@ -61,7 +61,7 @@ impl StackBounds {
     }
 
     pub fn current_thread_stack_bounds() -> Self {
-        unsafe { Self::new_thread_stack_bounds(crate::thread_self() as _) }
+        unsafe { Self::new_thread_stack_bounds(thread_self() as _) }
     }
 }
 

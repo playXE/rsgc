@@ -299,6 +299,7 @@ pub mod posix {
             unsafe { getpagesize() as _ }
         }
 
+        #[allow(unused_mut)]
         fn allocate_aligned(
             size: usize,
             alignment: usize,
@@ -315,7 +316,7 @@ pub mod posix {
             let prot = libc::PROT_READ
                 | libc::PROT_WRITE
                 | if is_executable { libc::PROT_EXEC } else { 0 };
-
+            
             let mut map_flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
 
             #[cfg(any(

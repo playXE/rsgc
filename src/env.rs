@@ -120,7 +120,7 @@ fn get_darwin_sysctl(name: &str) -> u64 {
 }
 
 pub fn get_total_memory() -> usize {
-    if cfg!(target_os = "linux") {
+    /*if cfg!(target_os = "linux") {
         get_total_memory_linux("/proc/meminfo")
     } else if cfg!(target_os = "windows") {
         ADRESSABLE_SIZE
@@ -130,5 +130,23 @@ pub fn get_total_memory() -> usize {
         get_darwin_sysctl("hm.usermem") as _
     } else {
         ADRESSABLE_SIZE
+    }*/
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_os="linux")]
+        {
+            get_total_memory_linux("/proc/meminfo")
+        } else if #[cfg(target_os="windows")]
+        {
+            ADRESSABLE_SIZE
+        } else if #[cfg(any(target_os="macos", target_os="ios", target_os="tvos", target_os="watchos"))]
+        {
+            get_darwin_sysctl("hw.memsize") as _
+        } else if #[cfg(target_os="freebsd")]
+        {
+            get_darwin_sysctl("hm.usermem") as _
+        } else {
+            ADRESSABLE_SIZE
+        }
     }
 }
