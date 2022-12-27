@@ -1,10 +1,19 @@
-use std::ptr::null;
+use std::ptr::{null, null_mut};
 
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StackBounds {
     pub origin: *mut u8,
     pub bound: *mut u8,
+}
+
+impl StackBounds {
+    pub const fn none() -> Self {
+        Self {
+            origin: null_mut(),
+            bound: null_mut(),
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

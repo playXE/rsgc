@@ -105,5 +105,5 @@ pub trait Heuristics {
 }
 
 
-pub mod compact;
+pub mod static_;
 pub mod adaptive;

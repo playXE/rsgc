@@ -1,150 +1,138 @@
-use std::sync::Arc;
+use std::{collections::hash_map::RandomState, hash::Hash};
 
-use rsgc::{
-    env::read_uint_from_env,
-    heap::{region::HeapArguments, thread::Thread},
-    system::object::{Allocation, Handle},
-    system::traits::Object,
-};
+use rand::distributions::*;
+use rsgc::{system::{collections::linked_hashmap::*, traits::Object, object::Handle, string::Str}, thread::{Thread, main_thread}, heap::region::HeapArguments};
 
-#[allow(dead_code)]
-pub struct TreeNode {
-    item: i64,
-    left: Option<Handle<Self>>,
-    right: Option<Handle<Self>>,
+struct Params {
+    max_size: usize,
 }
 
-impl Object for TreeNode {
-    fn trace(&self, visitor: &mut dyn rsgc::system::traits::Visitor) {
-        if let Some(ref left) = self.left {
-            left.trace(visitor);
-        }
+impl<K: Object, V: Object, S: 'static> LinkedHashMapExt<K, V, S> for Params {
+    fn remove_eldest_entry(
+        &self,
+        map: &Handle<LinkedHashMap<K,V,S, Self>>,
+        _eldest: &Handle<Node<K,V>>
+    ) -> bool {
+        println!("will remove? {} > {}", map.len(), self.max_size);
+        map.len() > self.max_size
+    }   
+}
 
-        if let Some(ref right) = self.right {
-            right.trace(visitor);
+pub struct LRUCache<K: Object, V: Object> {
+    hmap: Handle<LinkedHashMap<K, V, RandomState, Params>>
+}
+
+impl<K: 'static + Object + PartialEq + Eq + Hash, V: 'static + Object> LRUCache<K, V> {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            hmap: LinkedHashMap::with_hasher_and_capacity(RandomState::new(), 16, Params { max_size }, true)
         }
     }
-}
 
-impl Allocation for TreeNode {
-    const FINALIZE: bool = false;
-    const DESTRUCTIBLE: bool = false;
-}
-
-impl TreeNode {
-    fn check_tree(&self) -> usize {
-        if self.left.is_none() {
-            return 1;
-        }
-
-        1 + self.left.unwrap().check_tree() + self.right.unwrap().check_tree()
-    }
-}
-
-fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
-    thread.safepoint();
-    let node = if 0 < depth {
-        let node = TreeNode {
-            item: 0,
-            left: None,
-            right: None,
-        };
-        let mut node = thread.allocate_fixed(node);
-        //thread.write_barrier(node);
-        node.as_mut().left = Some(create_tree(thread, depth - 1));
-        node.as_mut().right = Some(create_tree(thread, depth - 1));
-
-        node
-    } else {
-        let node = TreeNode {
-            item: 0,
-            left: None,
-            right: None,
-        };
-
-        thread.allocate_fixed(node)
-    };
-    
-    node
-}
-
-fn bench_parallel() {
-    let min_depth = 4;
-    let max_depth = match read_uint_from_env("TREE_DEPTH") {
-        Some(x) if x < min_depth + 2 => min_depth + 2,
-        Some(x) => x,
-        _ => 21,
-    };
-
-    let start = std::time::Instant::now();
-    let stretch_depth = max_depth + 1;
-
+    pub fn get(&self, key: &K) -> Option<&V> 
     {
-        println!(
-            "stretch tree of depth {}\t check: {}",
-            stretch_depth,
-            create_tree(Thread::current(), stretch_depth as _)
-                .as_ref()
-                .check_tree()
-        );
+        self.hmap.get(key)
     }
 
-    let long_lasting_tree = create_tree(Thread::current(), max_depth as _);
-    use parking_lot::Mutex;
-    let results = Arc::new(
-        (0..(max_depth - min_depth) / 2 + 1)
-            .map(|_| Mutex::new(String::new()))
-            .collect::<Vec<_>>(),
-    );
-    //let safe_scope = SafeScope::new(rsgc::heap::thread::thread());
-    rsgc::thread::scoped::scoped(|scope| {
-        let mut d = min_depth;
+    pub fn put(&mut self, thread: &mut Thread, key: K, value: V) {
+        self.hmap.put(thread, key, value, true);
+    }
+}
 
-        while d <= max_depth {
-            let depth = d;
-            let cloned = results.clone();
-            scope.spawn(move || {
-                let thread = Thread::current();
-                let iterations = 1 << (max_depth - depth + min_depth);
-                let mut check = 0;
-                for _ in 1..=iterations {
-                    //thread.safepoint();
-                    let tree_node = create_tree(thread, depth as _);
-                    check += tree_node.as_ref().check_tree();
-                }
+pub struct CacheChurner {
+    id: usize,
+    size: usize,
+    cache: LRUCache<usize, Handle<Str>>,
+    hits: usize,
+    misses: usize,
+    target_hit_ratio: f64,
+}
 
-                *cloned[(depth - min_depth) / 2].lock() = format!(
-                    "{}\t trees of depth {}\t check: {}",
-                    iterations, depth, check
-                );
-            });
-
-            d += 2;
+impl CacheChurner {
+    pub fn new(id: usize, size: usize, target_hit_ratio: f64) -> Self {
+        Self {
+            id,
+            size,
+            cache: LRUCache::new(size),
+            hits: 0,
+            misses: 0,
+            target_hit_ratio,
         }
-    });
-    //drop(safe_scope);
-    for result in results.iter() {
-        println!("{}", *result.lock());
     }
-    println!(
-        "long lived tree of depth {}\t check: {}",
-        max_depth,
-        long_lasting_tree.as_ref().check_tree()
-    );
 
-    println!(
-        "binary trees took: {:03} secs",
-        start.elapsed().as_micros() as f64 / 1000.0 / 1000.0
-    );
+    pub fn run(&mut self) {
+        let mut have_reported_full = false;
+       
+        loop {
+            self.churn();
+            if !have_reported_full && self.cache.hmap.len() == self.size {
+                eprintln!("#{}: cache is now full", self.id);
+                have_reported_full = true;
+            }
+        }
+
+        
+    }
+
+    pub fn churn(&mut self) {
+        let th = Thread::current(); println!("0..{}", self.size as f64 / self.target_hit_ratio as f64);
+        for _ in 0..1000 {
+            th.safepoint();
+            let n = self.size as f64 / self.target_hit_ratio;
+            let key = Uniform::new(0, n as usize).sample(&mut rand::thread_rng());
+            if self.cache.get(&key).is_some() {
+                
+                self.hits += 1;
+            } else {
+                self.misses += 1;
+                let s = Str::new(th, "value");
+                self.cache.put(th, key, s);
+                assert!(self.cache.hmap.len() <= self.size + 1, "too much keys? {}", self.cache.hmap.len());
+            }
+        }
+    }
+}
+
+fn test_eviction() {
+    let mut c = LRUCache::new(2);
+    let t = Thread::current();
+    let k = Str::new(t, "k1");
+    let v = Str::new(t, "v1");
+    let k1 = k;
+    c.put(t, k, v);
+
+    let k = Str::new(t, "k2");
+    let v = Str::new(t, "v2");
+    c.put(t, k, v);
+
+    c.get(&k1).unwrap();
+
+    let k = Str::new(t, "k3");
+    let v = Str::new(t, "v3");
+    c.put(t, k, v);
+
+    assert_eq!(&*c.get(&k1).copied().unwrap(), "v1");
 }
 
 fn main() {
     env_logger::init();
     let args = HeapArguments::from_env();
 
-    rsgc::thread::main_thread(args, |heap| {
-        heap.add_core_root_set();
+    let _ = main_thread(args, |_| {
 
-        bench_parallel();
-    });
+        test_eviction();
+        let mut churner = CacheChurner::new(0, 10, 0.5);
+
+        let mut i = 0;
+
+        while i < 10000 {
+            churner.churn();
+            i += 1;
+        }
+
+        let hit_ratio = churner.hits as f64 / (churner.hits as f64 + churner.misses as f64);
+
+        println!("hit ratio: {:.2}", hit_ratio);
+        Ok(())
+    }); 
 }

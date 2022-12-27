@@ -90,23 +90,17 @@ impl fmt::Debug for Str {
     }
 }
 
-impl<T: AsRef<str>> PartialEq<T> for Str {
-    fn eq(&self, other: &T) -> bool {
+impl PartialEq for Str {
+    fn eq(&self, other: &Self) -> bool {
         self.as_ref() == other.as_ref()
     }
 }
 
 impl Eq for Str {}
 
-impl<T: AsRef<str>> PartialOrd<T> for Str {
-    fn partial_cmp(&self, other: &T) -> Option<std::cmp::Ordering> {
-        self.as_ref().partial_cmp(other.as_ref())
-    }
-}
-
-impl Ord for Str {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.as_ref().cmp(other.as_ref())
+impl PartialEq<str> for Str {
+    fn eq(&self, other: &str) -> bool {
+        self.as_ref() == other
     }
 }
 

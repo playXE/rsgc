@@ -6,7 +6,7 @@ use std::{
     mem::{size_of, MaybeUninit},
     panic::{AssertUnwindSafe, UnwindSafe},
     ptr::{null, null_mut},
-    sync::atomic::{AtomicI8, AtomicUsize, Ordering},
+    sync::atomic::{AtomicI8, AtomicUsize, Ordering, AtomicU64},
     thread::{JoinHandle, ThreadId},
 };
 
@@ -53,7 +53,7 @@ pub const GC_STATE_SAFE: i8 = 2;
 ///
 /// By using this structure you can allocate, synchronize with GC and insert write barriers.
 pub struct Thread {
-    pub(crate) id: ThreadId,
+    pub(crate) id: u64,
     pub(crate) tlab: ThreadLocalAllocBuffer,
     pub(crate) biased_begin: usize,
     satb_mark_queue: LocalSSB,
@@ -67,6 +67,8 @@ pub struct Thread {
     gc_state: i8,
     pub(crate) platform_registers: *mut PlatformRegisters,
 }
+
+static THREAD_ID: AtomicU64 = AtomicU64::new(0);
 
 impl Thread {
     pub fn safepoint_offset() -> usize {
@@ -123,7 +125,7 @@ impl Thread {
 
     /// Allocates fixed sized object on the heap.
     #[inline]
-    pub fn allocate_fixed<T: 'static + Allocation>(&mut self, value: T) -> Handle<T> {
+    pub fn allocate<T: 'static + Allocation>(&mut self, value: T) -> Handle<T>{
         unsafe {
             let size = align_usize(T::SIZE + size_of::<HeapObjectHeader>(), 16);
             let mem = self.allocate_raw(size);
@@ -483,7 +485,9 @@ impl Thread {
     }
 
     pub fn current() -> &'static mut Thread {
-        THREAD.with(|thread| unsafe { &mut *thread.get() })
+        unsafe {
+            &mut THREAD
+        }
     }
 
     pub fn get_registers(&self) -> (*mut u8, usize) {
@@ -556,7 +560,7 @@ pub fn safepoint_scope<R>(cb: impl FnOnce() -> R) -> R {
 }
 
 static mut SINK: u8 = 0;
-
+/* 
 thread_local! {
     static THREAD: UnsafeCell<Thread> = UnsafeCell::new(
         Thread {
@@ -574,7 +578,24 @@ thread_local! {
             cm_in_progress: false,
             platform_registers: null_mut()
         });
-}
+}*/
+
+#[thread_local]
+static mut THREAD: Thread = Thread {
+    biased_begin: 0,
+    id: u64::MAX,
+    mark_ctx: null_mut(),
+    mark_bitmap: null_mut(),
+    tlab: ThreadLocalAllocBuffer::new(),
+    stack: StackBounds::none(),
+    safepoint: null_mut(),
+    last_sp: null_mut(),
+    max_tlab_size: 0,
+    gc_state: 0,
+    satb_mark_queue: LocalSSB::new(),
+    cm_in_progress: false,
+    platform_registers: null_mut(),
+};
 
 use parking_lot::lock_api::RawMutex;
 use sync::mutex::RawMutex as Lock;
@@ -600,7 +621,7 @@ impl Threads {
     pub fn remove_current_thread(&self) {
         unsafe {
             let thread = Thread::current();
-            (*thread).tlab.retire(std::thread::current().id());
+            (*thread).tlab.retire(thread.id);
             (*thread).flush_ssb();
             let raw = thread as *mut Thread;
 
@@ -646,7 +667,7 @@ pub(crate) fn threads() -> &'static Threads {
 
 pub struct OOM(pub usize);
 
-pub fn main_thread(args: HeapArguments, callback: impl FnOnce(&mut Heap) + UnwindSafe) {
+pub fn main_thread<R>(args: HeapArguments, callback: impl FnOnce(&mut Heap) -> Result<R, Box<dyn std::error::Error>> + UnwindSafe) -> Result<R, Box<dyn std::error::Error>> {
     let heap = Heap::new(args);
     Thread::current().register();
     let res = std::panic::catch_unwind(|| callback(super::heap::heap()));
@@ -661,8 +682,10 @@ pub fn main_thread(args: HeapArguments, callback: impl FnOnce(&mut Heap) + Unwin
     }
 
     match res {
-        Ok(_) => (),
-        Err(err) => std::panic::resume_unwind(err),
+        Ok(res) => res,
+        Err(err) => {
+            std::panic::resume_unwind(err);
+        }
     }
 }
 

@@ -6,8 +6,10 @@
     ptr_metadata,
     core_intrinsics,
     specialization,
+    thread_local,
     ptr_sub_ptr,
-    portable_simd
+    portable_simd,
+    arbitrary_self_types
 )]
 #![allow(dead_code, unused_imports, incomplete_features)]
 

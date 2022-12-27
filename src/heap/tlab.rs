@@ -74,7 +74,7 @@ impl ThreadLocalAllocBuffer {
     }
 
     /// Invoked before GC cycle to mark free memory as actually free.
-    pub fn retire(&mut self, id: ThreadId) {
+    pub fn retire(&mut self, id: u64) {
         if self.end() != 0 {
             unsafe {
                 self.free_remaining(id);
@@ -86,7 +86,7 @@ impl ThreadLocalAllocBuffer {
         }
     }
 
-    unsafe fn free_remaining(&mut self, id: ThreadId) {
+    unsafe fn free_remaining(&mut self, id: u64) {
         let heap = heap();
         heap.lock.lock();
         let region_ix = heap.region_index(self.start as *mut u8);

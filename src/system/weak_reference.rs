@@ -44,7 +44,7 @@ impl<T: ?Sized + Object> WeakReference<T> {
         T: 'static,
     {
         unsafe {
-            let this = thread.allocate_fixed(WeakReference {
+            let this = thread.allocate(WeakReference {
                 ptr: target.as_ptr(),
                 next: AtomicPtr::new(null_mut()),
                 _marker: PhantomData,

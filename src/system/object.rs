@@ -445,6 +445,10 @@ impl<T: Object + ?Sized> Handle<T> {
     pub fn is<U: Object + ?Sized + 'static>(&self) -> bool {
         self.vtable().type_id == TypeId::of::<U>()
     }
+    #[inline]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.ptr == other.ptr
+    }
 }
 
 impl Handle<dyn Object> {
@@ -454,6 +458,22 @@ impl Handle<dyn Object> {
                 ptr: self.ptr,
                 marker: Default::default(),
             })
+        } else {
+            None
+        }
+    }
+
+    pub fn downcast_ref<U: Object + Sized + 'static>(&self) -> Option<&U> {
+        if self.vtable().type_id == TypeId::of::<U>() {
+            Some(unsafe { self.ptr.cast::<U>().as_ref() })
+        } else {
+            None
+        }
+    }
+
+    pub fn downcast_mut<U: Object + Sized + 'static>(&mut self) -> Option<&mut U> {
+        if self.vtable().type_id == TypeId::of::<U>() {
+            Some(unsafe { self.ptr.cast::<U>().as_mut() })
         } else {
             None
         }

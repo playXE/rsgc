@@ -1,6 +1,6 @@
 use crate::system::object::*;
 
-pub trait Object {
+pub trait Object: 'static {
     fn trace(&self, visitor: &mut dyn Visitor) {
         let _ = visitor;
     }
@@ -47,3 +47,25 @@ impl_simple!(
     i8 i16 i32 i64 i128 
     isize usize 
 );
+
+impl<T: Object> Object for Option<T> {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        if let Some(value) = self {
+            value.trace(visitor);
+        }
+    }
+
+    fn trace_range(&self, from: usize, to: usize, visitor: &mut dyn Visitor) {
+        if let Some(value) = self {
+            value.trace_range(from, to, visitor);
+        }
+    }
+}
+
+impl<T: Object + Allocation> Allocation for Option<T> {
+    const DESTRUCTIBLE: bool = T::DESTRUCTIBLE;
+    const FINALIZE: bool = T::FINALIZE;
+    const NO_HEAP_PTRS: bool = T::NO_HEAP_PTRS;
+    const VARSIZE_NO_HEAP_PTRS: bool = T::VARSIZE_NO_HEAP_PTRS;
+    const VARSIZE: bool = T::VARSIZE;   
+}

@@ -1,5 +1,5 @@
 use super::traits::*;
-use crate::heap::thread::*;
+use crate::heap::{thread::*, AllocError};
 use super::object::*;
 use std::{mem::size_of, ops::{Deref, DerefMut}, hash::Hash};
 #[repr(C)]

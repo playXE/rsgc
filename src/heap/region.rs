@@ -339,7 +339,7 @@ impl HeapArguments {
         this.heuristics = match std::env::var("GC_HEURISTICS") {
             Ok(x) => match x.to_lowercase().as_str() {
                 "adaptive" => GCHeuristic::Adaptive,
-                "compact" => GCHeuristic::Compact,
+                "static" => GCHeuristic::Static,
                 _ => todo!("unsupported or unknown heuristic: {}", x),
             },
             _ => GCHeuristic::Adaptive,

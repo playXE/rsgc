@@ -1,6 +1,8 @@
-use std::time::Instant;
+use std::{time::Instant, error::Error};
 
 use atomic::{Atomic, Ordering};
+
+use crate::formatted_size;
 
 use self::heap::heap;
 
@@ -312,9 +314,6 @@ pub enum DegenPoint {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum GCHeuristic {
     Adaptive,
-    Agressive,
-    Compact,
-    Passive,
     Static,
 }
 
@@ -322,9 +321,6 @@ impl GCHeuristic {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "adaptive" => GCHeuristic::Adaptive,
-            "agressive" => GCHeuristic::Agressive,
-            "compact" => GCHeuristic::Compact,
-            "passive" => GCHeuristic::Passive,
             "static" => GCHeuristic::Static,
             _ => panic!("Unknown GC heuristic: {}", s),
         }
@@ -372,5 +368,31 @@ impl Drop for PausePhase {
         let elapsed = self.start.elapsed();
         let id = heap().controller_thread().get_gc_id();
         log::info!(target: "gc", "GC({}) Pause {} {}ms", id, self.name, elapsed.as_micros() as f64 / 1000.0);
+    }
+}
+
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[non_exhaustive]
+pub enum AllocError {
+    OutOfMemory(usize),
+    NonRegisteredThread,
+}
+
+impl Error for AllocError {
+    fn description(&self) -> &str {
+        match self {
+            AllocError::OutOfMemory(_) => "Out of memory",
+            AllocError::NonRegisteredThread => "Non registered thread"
+        }
+    }
+}   
+
+impl std::fmt::Display for AllocError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AllocError::OutOfMemory(size) => write!(f, "Out of memory when allocating {}", formatted_size(*size)),
+            AllocError::NonRegisteredThread => write!(f, "Trying to allocate in a non registered thread"),
+        }
     }
 }

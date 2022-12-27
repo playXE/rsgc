@@ -15,6 +15,7 @@ use crate::{
     system::object::HeapObjectHeader,
     system::traits::{Visitor, WeakProcessor},
     thread::{safepoint_scope, threads},
+    utils::is_aligned,
 };
 
 use super::{
@@ -24,7 +25,7 @@ use super::{
     concurrent_thread::ConcurrentGCThread,
     controller::ControlThread,
     free_set::RegionFreeSet,
-    heuristics::{adaptive::AdaptiveHeuristics, compact::CompactHeuristics, Heuristics},
+    heuristics::{adaptive::AdaptiveHeuristics, static_::StaticHeuristics, Heuristics},
     mark::SlotVisitor,
     marking_context::MarkingContext,
     memory_region::MemoryRegion,
@@ -140,7 +141,15 @@ impl Heap {
         unsafe {
             let uncommit_start = mem.address().add(initial_size);
             let uncommit_size = mem.size() - initial_size;
-            PlatformVirtualMemory::decommit(uncommit_start, uncommit_size);
+            if uncommit_size != 0
+                && is_aligned(
+                    uncommit_size,
+                    VirtualMemory::<PlatformVirtualMemory>::page_size(),
+                    0,
+                )
+            {
+                PlatformVirtualMemory::decommit(uncommit_start, uncommit_size);
+            }
         }
         //PlatformVirtualMemory::commit(mem.address(), initial_size);
 
@@ -157,8 +166,7 @@ impl Heap {
 
         let heuristics = match heuristics {
             GCHeuristic::Adaptive => AdaptiveHeuristics::new(&opts),
-            GCHeuristic::Compact => CompactHeuristics::new(&mut opts),
-            _ => todo!(),
+            GCHeuristic::Static => StaticHeuristics::new(&mut opts),
         };
         let card_table = CardTable::new(mem.address(), mem.size());
         let this = Box::leak(Box::new(Self {

@@ -52,7 +52,7 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
         node.left = Some(create_tree(thread, depth - 1));
         node.right = Some(create_tree(thread, depth - 1));
 
-        thread.allocate_fixed(node)
+        thread.allocate(node)
     } else {
         let node = TreeNode {
             item: 0,
@@ -60,7 +60,7 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
             right: None,
         };
 
-        thread.allocate_fixed(node)
+        thread.allocate(node)
     };
     
     node
@@ -144,9 +144,11 @@ fn bench_parallel() {
 fn main() {
     let args = HeapArguments::from_env();
 
-    rsgc::thread::main_thread(args, |heap| {
+    let _ = rsgc::thread::main_thread(args, |heap| {
         heap.add_core_root_set();
 
         bench_parallel();
+
+        Ok(())
     });
 }

@@ -4,7 +4,7 @@ use crate::{formatted_size, heap::{heap::heap, region::HeapOptions}, utils::numb
 
 use super::Heuristics;
 
-pub struct CompactHeuristics {
+pub struct StaticHeuristics {
     degenerated_cycles_in_a_row: usize,
     successful_cycles_in_a_row: usize,
     cycle_start: Instant,
@@ -15,7 +15,7 @@ pub struct CompactHeuristics {
     gc_time_history: Box<TruncatedSeq>,
 }
 
-impl CompactHeuristics {
+impl StaticHeuristics {
     pub fn new(opts: &mut HeapOptions) -> Box<dyn Heuristics> {
         opts.uncommit = true;
         if opts.allocation_threshold == 0 {
@@ -47,7 +47,7 @@ impl CompactHeuristics {
     }
 }
 
-impl Heuristics for CompactHeuristics {
+impl Heuristics for StaticHeuristics {
     fn gc_time_penalties(&self) -> isize {
         self.gc_time_penalties
     }
