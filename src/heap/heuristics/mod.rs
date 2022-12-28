@@ -52,7 +52,8 @@ pub trait Heuristics {
         false
     }
     fn should_degenerate_cycle(&self) -> bool {
-        self.degenerate_cycles_in_a_row() <= heap().options().full_gc_threshold
+        false
+        //self.degenerate_cycles_in_a_row() <= heap().options().full_gc_threshold
     }
 
     fn record_success_concurrent(&mut self) {

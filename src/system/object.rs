@@ -90,7 +90,7 @@ pub trait Allocation: Object + Sized {
     const VARSIZE_OFFSETOF_LENGTH: usize = 0;
     const VARSIZE_OFFSETOF_CAPACITY: usize = 0;
     const VARSIZE_OFFSETOF_VARPART: usize = 0;
-    const NO_HEAP_PTRS: bool = false;
+    const NO_HEAP_PTRS: bool = false && !Self::VARSIZE_NO_HEAP_PTRS;
     const VARSIZE_NO_HEAP_PTRS: bool = false;
     const USER_VTABLE: *const () = core::ptr::null();
 }
@@ -110,7 +110,7 @@ impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
         },
         varsize: VarSize {
             is_varsize: T::VARSIZE,
-            should_trace: T::VARSIZE_NO_HEAP_PTRS,
+            should_trace: !T::VARSIZE_NO_HEAP_PTRS,
             iterate_range: if T::VARSIZE && !T::VARSIZE_NO_HEAP_PTRS {
                 Some({
                     fn erased<T: Object>(
