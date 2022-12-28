@@ -173,7 +173,7 @@ impl Thread {
             }
             obj.add(1)
                 .cast::<u8>()
-                .add(T::VARSIZE_OFFSETOF_LENGTH)
+                .add(T::VARSIZE_OFFSETOF_CAPACITY)
                 .cast::<usize>()
                 .write(length);
 
