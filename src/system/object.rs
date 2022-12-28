@@ -7,7 +7,7 @@ use std::{
     mem::{size_of, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
-    sync::atomic::{AtomicPtr, AtomicU64},
+    sync::atomic::{AtomicPtr, AtomicU64, AtomicU32},
 };
 
 use atomic::Ordering;
@@ -63,8 +63,10 @@ pub struct VarSize {
     pub should_trace: bool,
     /// Size of item in a variable sized object
     pub itemsize: usize,
-    /// Offset of length field in a variable sized object. Used by GC to determine object size
+    /// Offset of length field in a variable sized object. Used by GC to trace array
     pub offset_of_length: usize,
+    /// Offset of length field in a variable sized object. Used by GC to determine object size
+    pub offset_of_capacity: usize,
     /// Offset of variable part of object. Used by GC to get pointer to variable part of object
     pub offset_of_variable_part: usize,
 
@@ -86,6 +88,7 @@ pub trait Allocation: Object + Sized {
     const VARSIZE: bool = false;
     const VARSIZE_ITEM_SIZE: usize = 0;
     const VARSIZE_OFFSETOF_LENGTH: usize = 0;
+    const VARSIZE_OFFSETOF_CAPACITY: usize = 0;
     const VARSIZE_OFFSETOF_VARPART: usize = 0;
     const NO_HEAP_PTRS: bool = false;
     const VARSIZE_NO_HEAP_PTRS: bool = false;
@@ -128,6 +131,7 @@ impl<T: 'static + Allocation> ConstVal<&'static VTable> for VT<T> {
             },
             itemsize: T::VARSIZE_ITEM_SIZE,
             offset_of_length: T::VARSIZE_OFFSETOF_LENGTH,
+            offset_of_capacity: T::VARSIZE_OFFSETOF_CAPACITY,
             offset_of_variable_part: T::VARSIZE_OFFSETOF_VARPART,
         },
         is_varsize: T::VARSIZE,
@@ -336,7 +340,7 @@ impl HeapObjectHeader {
         let mut result = vt.size;
         if vt.is_varsize {
             let data = self.data();
-            result += data.add(vt.varsize.offset_of_length).cast::<u32>().read() as usize
+            result += data.add(vt.varsize.offset_of_capacity).cast::<u32>().read() as usize
                 * vt.varsize.itemsize;
         }
         align_usize(result + size_of::<Self>(), 16)
@@ -384,9 +388,17 @@ impl HeapObjectHeader {
     pub fn array_length(&self) -> usize {
         let start = self.data();
         let varsize = &self.vtable().varsize;
-        let length = unsafe { start.add(varsize.offset_of_length).cast::<u32>().read() };
+        let length = unsafe { &*start.add(varsize.offset_of_length).cast::<AtomicU32>() };
 
-        length as _
+        length.load(Ordering::Relaxed) as _
+    }
+
+    pub fn array_capacity(&self) -> usize {
+        let start = self.data();
+        let varsize = &self.vtable().varsize;
+        let capacity = unsafe { start.add(varsize.offset_of_capacity).cast::<u32>().read() };
+
+        capacity as _
     }
 }
 

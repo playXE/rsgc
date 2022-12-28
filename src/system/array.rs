@@ -1,3 +1,5 @@
+use memoffset::offset_of;
+
 use super::traits::*;
 use crate::heap::{thread::*, AllocError};
 use super::object::*;
@@ -127,7 +129,8 @@ impl<T: Object + Sized + Allocation> Allocation for Array<T> {
     const VARSIZE_NO_HEAP_PTRS: bool = T::NO_HEAP_PTRS;
     const VARSIZE: bool = true;
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
-    const VARSIZE_OFFSETOF_LENGTH: usize = 0;
+    const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Self, length);
+    const VARSIZE_OFFSETOF_CAPACITY: usize = 0;
     const VARSIZE_OFFSETOF_VARPART: usize = size_of::<usize>();
 }
 use std::fmt;

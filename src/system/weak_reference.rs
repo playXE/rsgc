@@ -78,11 +78,13 @@ impl<T: ?Sized + Object> WeakReference<T> {
             let next = (*weak).next.load(Ordering::Relaxed);
             wr = update_reference(wr);
             if wr.is_null() {
+                println!("unlinking weak reference {:p}", weak);
                 wr = next;
                 if !tail.is_null() {
                     (*tail).next = AtomicPtr::new(wr);
+                } else {
+                    HEAD_REF.store(wr, Ordering::Relaxed);
                 }
-                continue;
             } else {
                 let target = update_reference((*weak).ptr);
 
