@@ -1,4 +1,4 @@
-use std::{ptr::null_mut, mem::MaybeUninit};
+use std::{mem::MaybeUninit, ptr::null_mut};
 
 use libc::*;
 
@@ -20,7 +20,27 @@ unsafe extern "C" fn sigdie_handler(sig: i32, _info: *mut siginfo_t, _context: *
     // fall-through return to re-execute faulting statement (but without the error handler)
 }
 
-unsafe extern "C" fn segv_handler(sig: i32, info: *mut siginfo_t, context: *mut ucontext_t) {
+pub unsafe extern "C" fn handle_sigsegv(
+    _sig: i32,
+    info: *mut siginfo_t,
+    context: *mut ucontext_t,
+) -> bool {
+    if safepoint::addr_in_safepoint((*info).si_addr() as _) {
+        let thread = Thread::current();
+        thread.platform_registers = registers_from_ucontext(context);
+
+        log::trace!(target: "gc-safepoint", "{:?} reached safepoint", std::thread::current().id());
+        // basically spin-loop that waits for safepoint to be disabled
+        thread.enter_safepoint(get_sp_from_ucontext(context).cast());
+        thread.platform_registers = null_mut();
+        log::trace!(target: "gc-safepoint", "{:?} exit safepoint", std::thread::current().id());
+        true
+    } else {
+        false
+    }
+}
+
+pub unsafe extern "C" fn segv_handler(sig: i32, info: *mut siginfo_t, context: *mut ucontext_t) {
     // polling page was protected and some thread tried to read from it
     // and we got here. Polling page gets protected only when safepoint is requested.
     if safepoint::addr_in_safepoint((*info).si_addr() as usize) {
