@@ -124,7 +124,6 @@ impl Thread {
     }
 
     /// Allocates fixed sized object on the heap.
-    #[inline]
     pub fn allocate<T: 'static + Allocation>(&mut self, value: T) -> Handle<T>{
         unsafe {
             let size = align_usize(T::SIZE + size_of::<HeapObjectHeader>(), 16);
@@ -133,8 +132,6 @@ impl Thread {
             (*obj).word = 0;
             (*obj).set_vtable(VT::<T>::VAL as *const VTable as _);
             (*obj).set_heap_size(size);
-            //(*obj).clear_marked();
-            //(*obj).set_finalization_ordering(false);
             if T::NO_HEAP_PTRS {
                 (*obj).set_no_heap_ptrs();
             }
@@ -166,8 +163,6 @@ impl Thread {
             (*obj).word = 0;
             (*obj).set_vtable(VT::<T>::VAL as *const VTable as _);
             (*obj).set_heap_size(size);
-            (*obj).clear_marked();
-            (*obj).set_finalization_ordering(false);
             if T::NO_HEAP_PTRS {
                 (*obj).set_no_heap_ptrs();
             }

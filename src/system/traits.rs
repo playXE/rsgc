@@ -35,7 +35,9 @@ macro_rules! impl_simple {
     ($($t: ty)*) => {
         $(
             impl Object for $t {}
-            impl $crate::system::object::Allocation for $t {}
+            impl $crate::system::object::Allocation for $t {
+                const NO_HEAP_PTRS: bool = true;
+            }
         )*
     };
 }

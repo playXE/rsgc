@@ -104,5 +104,5 @@ use system::object::Allocation;
 /// 
 /// Write barrier is required only if `T` contains heap pointers.
 pub const fn needs_write_barrier<T: Allocation>() -> bool {
-    !T::NO_HEAP_PTRS || !T::VARSIZE_NO_HEAP_PTRS
+    !T::NO_HEAP_PTRS || (T::VARSIZE && !T::VARSIZE_NO_HEAP_PTRS)
 }
