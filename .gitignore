@@ -1,5 +1,6 @@
 /target
-/benchmarks/binarytrees/csharp/bin 
-/benchmarks/binarytrees/csharp/obj
-/benchmarks/binarytrees/java/binarytrees*.class
-/benchmarks/binarytrees/rust/target
+/benchmarks/*/csharp/bin 
+/benchmarks/*/csharp/obj
+/benchmarks/*/java/binarytrees*.class
+/benchmarks/*/rust/target
+/benchmarks/*/rust/Cargo.lock

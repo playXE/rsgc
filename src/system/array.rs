@@ -12,14 +12,16 @@ pub struct Array<T: Object + Sized> {
 }
 
 impl<T: 'static + Object + Sized> Array<T> {
-    pub fn new(th: &mut Thread, len: usize, mut init: impl FnMut(usize) -> T) -> Handle<Self> where T: Allocation {
+    pub fn new(th: &mut Thread, len: usize, mut init: impl FnMut(&mut Thread, usize) -> T) -> Handle<Self> where T: Allocation {
         let mut result = th.allocate_varsize::<Self>(len);
         let arr = result.as_mut().as_mut_ptr();
         for i in 0..len {
             unsafe {
                 let data = (*arr).data.as_mut_ptr().add(i);
+                
+                let res = init(th, i);
                 th.write_barrier(result);
-                data.write(init(i));
+                data.write(res);
                 (*arr).init_length += 1;
             }
         }
@@ -126,7 +128,7 @@ impl<T: Object + Sized + Allocation> Allocation for Array<T> {
     const DESTRUCTIBLE: bool = true;
     const SIZE: usize = size_of::<Self>();
     const NO_HEAP_PTRS: bool = true;
-    const VARSIZE_NO_HEAP_PTRS: bool = T::NO_HEAP_PTRS;
+    const VARSIZE_NO_HEAP_PTRS: bool = T::NO_HEAP_PTRS || (T::VARSIZE && T::VARSIZE_NO_HEAP_PTRS);
     const VARSIZE: bool = true;
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
     const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Self, length);

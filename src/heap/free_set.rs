@@ -90,7 +90,6 @@ impl RegionFreeSet {
                 }
             }
         }
-
         self.recompute_bounds();
     }
 

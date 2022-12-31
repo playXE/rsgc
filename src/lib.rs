@@ -99,10 +99,17 @@ macro_rules! offsetof {
 pub use heap::thread;
 use system::object::Allocation;
 
-
 /// Returns true if write barrier is required when writing to a field of type `T`.
-/// 
+///
 /// Write barrier is required only if `T` contains heap pointers.
 pub const fn needs_write_barrier<T: Allocation>() -> bool {
     !T::NO_HEAP_PTRS || (T::VARSIZE && !T::VARSIZE_NO_HEAP_PTRS)
+}
+
+pub mod prelude {
+    pub use super::heap;
+    pub use super::system;
+    pub use heap::thread::*;
+    pub use heap::region::HeapArguments;
+    pub use system::{object::*, traits::*};
 }

@@ -451,11 +451,11 @@ impl Heap {
         // Full GC, which means we want to try more than 3 times.
         let mut tries = 0;
 
-        while result.is_null() && self.progress_last_gc.is_set() {
+        /*while result.is_null() && self.progress_last_gc.is_set() {
             tries += 1;
             self.controller_thread().handle_alloc_failure_gc(req);
             result = self.allocate_memory_under_lock(req, &mut in_new_region);
-        }
+        }*/
 
         while result.is_null() && tries <= 3 {
             tries += 1;

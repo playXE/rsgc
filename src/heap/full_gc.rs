@@ -91,8 +91,6 @@ impl FullGC {
             self.heap.heap_region_iterate(&closure);
         }
 
-        self.heap.free_set_mut().recycle_trash();
-
         self.heap.lock.lock();
         self.heap.free_set_mut().rebuild();
         self.heap.lock.unlock();

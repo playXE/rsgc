@@ -292,7 +292,7 @@ where
             };
         }
         self.threshold = new_thr;
-        let mut newtab = Array::new(thread, new_cap as _, |_| None);
+        let mut newtab = Array::new(thread, new_cap as _, |_,_| None);
         thread.write_barrier(*self);
         self.table = Some(newtab);
 

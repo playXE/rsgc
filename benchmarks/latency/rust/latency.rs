@@ -29,7 +29,6 @@ fn push_message(
 }
 
 fn main() {
-    env_logger::init();
     let mut worst = std::time::Duration::from_nanos(0);
 
     let res = std::panic::catch_unwind(move || {

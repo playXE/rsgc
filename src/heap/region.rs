@@ -431,7 +431,7 @@ impl Default for HeapArguments {
             tlab_waste_target_percent: 1,
             parallel_region_stride: 1024,
             parallel_gc_threads: std::thread::available_parallelism()
-                .map(|x| x.get() / 2)
+                .map(|x| x.get())
                 .unwrap_or(2),
             max_satb_buffer_flushes: 5,
             max_satb_buffer_size: 1024,

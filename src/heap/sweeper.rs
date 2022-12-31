@@ -24,6 +24,7 @@ impl SweepGarbageClosure {
         let mut start_of_gap = begin;
         let end = begin + heap.options().region_size_bytes;
         (*region).free_list.clear();
+        (*region).largest_free_list_entry = 0;
         //(*region).invoke_destructors(marking_context);
         (*region).object_start_bitmap.clear();
         let mut used = 0;
@@ -73,8 +74,9 @@ impl SweepGarbageClosure {
         }
         (*region).set_used(used);
         assert!(used != 0 || free != 0);
-        log::trace!(target: "gc-sweeper", "Sweeping region #{}:{:p} used: {} free: {} (previous diff: {})", (*region).index(), (*region).bottom() as *mut u8, formatted_size(used), formatted_size(free),
-            (*region).last_sweep_free as isize - free as isize
+        log::trace!(target: "gc-sweeper", "Sweeping region #{}:{:p} used: {} free: {} (previous diff: {}), max: {}", (*region).index(), (*region).bottom() as *mut u8, formatted_size(used), formatted_size(free),
+            (*region).last_sweep_free as isize - free as isize,
+            formatted_size((*region).largest_free_list_entry)
         );
         (*region).last_sweep_free = free;
 
