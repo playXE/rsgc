@@ -407,6 +407,9 @@ pub struct Handle<T: Object + ?Sized> {
     marker: PhantomData<NonNull<T>>,
 }
 
+unsafe impl<T: Send + Object + ?Sized> Send for Handle<T> {}
+unsafe impl<T: Sync + Object + ?Sized> Sync for Handle<T> {}
+
 impl<T: Object + ?Sized> Handle<T> {
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
