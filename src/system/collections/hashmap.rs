@@ -114,10 +114,7 @@ where
         Self::with_hasher_and_capacity(hash_builder, Self::DEFAULT_INITIAL_CAPACITY)
     }
 
-    pub fn with_hasher_and_capacity(
-        hash_builder: S,
-        initial_capacity: u32,
-    ) -> Handle<Self> {
+    pub fn with_hasher_and_capacity(hash_builder: S, initial_capacity: u32) -> Handle<Self> {
         Self::with_hasher_and_capacity_and_load_factor(
             hash_builder,
             initial_capacity,
@@ -292,7 +289,7 @@ where
             };
         }
         self.threshold = new_thr;
-        let mut newtab = Array::new(thread, new_cap as _, |_,_| None);
+        let mut newtab = Array::new(thread, new_cap as _, |_, _| None);
         thread.write_barrier(*self);
         self.table = Some(newtab);
 
@@ -379,9 +376,39 @@ where
             self.mod_count += 1;
         }
     }
+
+    pub fn entry<'a>(self: &'a mut Handle<Self>, key: K) -> Entry<'a, K, V, S>
+    where K: Hash + Eq + PartialEq
+    {
+        let hash = make_hash(&self.hash_builder, &key);
+        let tab = self.table;
+        let mut e = None;
+        if let Some(tab) = tab {
+            let i = ((tab.len() as u64 - 1) & hash) as usize;
+            let mut p = tab[i];
+            while let Some(n) = p {
+                if n.hash == hash && n.key.borrow() == &key {
+                    e = Some(n);
+                    break;
+                }
+                p = n.next;
+            }
+        } else {
+            self.resize().unwrap();
+        }
+        if let Some(e) = e {
+            Entry::Occupied(OccupiedEntry { map: self, node: e })
+        } else {
+            Entry::Vacant(VacantEntry {
+                key,
+                hash,
+                map: self,
+            })
+        }
+    }
 }
 
-impl<K: Object, V: Object, S: 'static> HashMap<K,V,S> {
+impl<K: Object, V: Object, S: 'static> HashMap<K, V, S> {
     pub fn len(self: &Handle<Self>) -> usize {
         self.size as _
     }
@@ -465,4 +492,92 @@ impl<'a, K: Object, V: Object, S> Iterator for Iter<'a, K, V, S> {
             None
         }
     }
+}
+
+pub struct VacantEntry<'a, K: Object, V: Object, S: 'static> {
+    map: &'a mut Handle<HashMap<K, V, S>>,
+    key: K,
+    hash: u64,
+}
+
+impl<'a, K: 'static + Object, V: 'static + Object, S> VacantEntry<'a, K, V, S> {
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+
+    pub fn insert(self, value: V) -> &'a mut V
+    where
+        K: PartialEq + Eq,
+        S: BuildHasher,
+    {
+        let thread = Thread::current();
+        let mut tab = self.map.table.unwrap();
+        let n = tab.len();
+        let i = ((n as u64 - 1) & self.hash) as usize;
+
+        let p = tab[i as usize];
+
+        let node = thread.allocate(Node {
+            hash: self.hash,
+            key: self.key,
+            value: Some(value),
+            next: p,
+        });
+
+        thread.write_barrier(tab);
+        tab[i] = Some(node);
+
+        self.map.size += 1;
+        self.map.mod_count += 1;
+        if self.map.size > self.map.threshold {
+            self.map.resize();
+        }
+
+        self.map.table.as_mut().unwrap()[i as usize]
+            .as_mut()
+            .unwrap()
+            .value
+            .as_mut()
+            .unwrap()
+    }
+}
+
+pub struct OccupiedEntry<'a, K: Object, V: Object, S: 'static> {
+    map: &'a mut Handle<HashMap<K, V, S>>,
+    node: Handle<Node<K, V>>,
+}
+
+impl<'a, K: 'static + Object, V: 'static + Object, S> OccupiedEntry<'a, K, V, S> {
+    pub fn key(&self) -> &K {
+        &self.node.key
+    }
+
+    pub fn get(&self) -> &V {
+        unsafe { self.node.value.as_ref().unwrap_unchecked() }
+    }
+
+    pub fn get_mut(&mut self) -> &mut V {
+        unsafe { self.node.value.as_mut().unwrap_unchecked() }
+    }
+
+    pub fn insert(&mut self, value: V) -> V {
+        let old = self.node.value.replace(value);
+        old.unwrap()
+    }
+
+    pub fn remove(&mut self) -> V
+    where
+        K: Hash + Eq,
+        S: BuildHasher,
+    {
+        let old = self.node.value.take();
+        self.map.remove_node(&self.node.key, self.node.hash);
+        old.unwrap()
+    }
+}
+
+
+pub enum Entry<'a, K: Object, V: Object, S: 'static> {
+    Occupied(OccupiedEntry<'a, K, V, S>),
+    Vacant(VacantEntry<'a, K, V, S>),
 }
