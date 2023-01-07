@@ -597,3 +597,27 @@ impl<T: Object + Ord> Ord for Handle<T> {
 
 impl Object for () {}
 impl Allocation for () {}
+
+impl<A: Object, B: Object> Object for (A, B) {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        self.0.trace(visitor);
+        self.1.trace(visitor);
+    }
+}
+impl<A: Object + Allocation, B: Object + Allocation> Allocation for (A, B) {
+    const SIZE: usize = A::SIZE + B::SIZE;
+    const NO_HEAP_PTRS: bool = A::NO_HEAP_PTRS && B::NO_HEAP_PTRS;
+}
+
+impl<A: Object, B: Object, C: Object> Object for (A, B, C) {
+    fn trace(&self, visitor: &mut dyn Visitor) {
+        self.0.trace(visitor);
+        self.1.trace(visitor);
+        self.2.trace(visitor);
+    }
+}
+impl<A: Object + Allocation, B: Object + Allocation, C: Object + Allocation> Allocation for (A, B, C) {
+    const SIZE: usize = A::SIZE + B::SIZE + C::SIZE;
+    const NO_HEAP_PTRS: bool = A::NO_HEAP_PTRS && B::NO_HEAP_PTRS && C::NO_HEAP_PTRS;
+}
+
