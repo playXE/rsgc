@@ -594,3 +594,6 @@ impl<T: Object + Ord> Ord for Handle<T> {
         self.as_ref().cmp(other.as_ref())
     }
 }
+
+impl Object for () {}
+impl Allocation for () {}

@@ -1,4 +1,4 @@
-use std::{time::Instant, error::Error};
+use std::{error::Error, time::Instant};
 
 use atomic::{Atomic, Ordering};
 
@@ -8,6 +8,7 @@ use self::heap::heap;
 
 pub mod bitmap;
 pub mod card_table;
+pub mod concurrent_gc;
 pub mod concurrent_thread;
 pub mod controller;
 pub mod degenerated_gc;
@@ -15,29 +16,28 @@ pub mod free_list;
 pub mod free_set;
 pub mod full_gc;
 pub mod heap;
-pub mod timer;
-pub mod mark;
-pub mod obj_storage;
-pub mod pacer;
-pub mod region;
-pub mod safepoint;
-pub mod worker_policy;
-pub mod thread;
-pub mod write_barrier;
-//pub mod satb_mark_queue;
-pub mod concurrent_gc;
 pub mod heuristics;
+pub mod mark;
 pub mod mark_bitmap;
 pub mod marking_context;
 pub mod memory_region;
+pub mod obj_storage;
+pub mod pacer;
 pub mod reference_queue;
+pub mod region;
 pub mod root_processor;
+pub mod safepoint;
 pub mod shared_vars;
 pub mod signals;
 pub mod stack;
 pub mod sweeper;
+pub mod thread;
+pub mod timer;
 pub mod tlab;
+pub mod tracer;
 pub mod virtual_memory;
+pub mod worker_policy;
+pub mod write_barrier;
 
 #[inline(always)]
 pub const fn align_down(addr: usize, align: usize) -> usize {
@@ -373,7 +373,6 @@ impl Drop for PausePhase {
     }
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[non_exhaustive]
 pub enum AllocError {
@@ -385,16 +384,20 @@ impl Error for AllocError {
     fn description(&self) -> &str {
         match self {
             AllocError::OutOfMemory(_) => "Out of memory",
-            AllocError::NonRegisteredThread => "Non registered thread"
+            AllocError::NonRegisteredThread => "Non registered thread",
         }
     }
-}   
+}
 
 impl std::fmt::Display for AllocError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AllocError::OutOfMemory(size) => write!(f, "Out of memory when allocating {}", formatted_size(*size)),
-            AllocError::NonRegisteredThread => write!(f, "Trying to allocate in a non registered thread"),
+            AllocError::OutOfMemory(size) => {
+                write!(f, "Out of memory when allocating {}", formatted_size(*size))
+            }
+            AllocError::NonRegisteredThread => {
+                write!(f, "Trying to allocate in a non registered thread")
+            }
         }
     }
 }
