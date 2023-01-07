@@ -464,6 +464,13 @@ impl<T: Object + ?Sized> Handle<T> {
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.ptr == other.ptr
     }
+
+    #[inline]
+    pub fn replace(&mut self, other: T) -> T
+    where T: Sized
+    {
+        std::mem::replace(&mut**self, other)
+    }
 }
 
 impl Handle<dyn Object> {
