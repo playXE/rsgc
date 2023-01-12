@@ -43,16 +43,18 @@ impl TreeNode {
 fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
     thread.safepoint();
     let node = if 0 < depth {
-        let mut node = TreeNode {
+        let mut node = thread.allocate(TreeNode {
             item: 0,
             left: None,
             right: None,
-        };
+        });
 
+        thread.write_barrier(node);
         node.left = Some(create_tree(thread, depth - 1));
+        thread.write_barrier(node);
         node.right = Some(create_tree(thread, depth - 1));
 
-        thread.allocate(node)
+        node 
     } else {
         let node = TreeNode {
             item: 0,
@@ -142,6 +144,7 @@ fn bench_parallel() {
 }
 
 fn main() {
+    env_logger::init();
     let args = HeapArguments::from_env();
 
     let _ = rsgc::thread::main_thread(args, |heap| {

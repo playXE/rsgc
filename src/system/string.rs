@@ -4,6 +4,7 @@ use crate::thread::Thread;
 
 use super::{traits::Object, object::{Allocation, Handle}};
 
+/// Simple zero-terminated UTF-8 encoded string allocated on heap.
 #[repr(C)]
 pub struct Str {
     length: u32,
@@ -24,12 +25,12 @@ impl Str {
     pub fn new(thread: &mut Thread, init: impl AsRef<str>) -> Handle<Str> {
         unsafe {
             let init = init.as_ref();
-            let mut result = thread.allocate_varsize::<Str>(init.len());
+            let mut result = thread.allocate_varsize::<Str>(init.len() + 1);
             let result_ref = result.assume_init_mut();
-            result_ref.length = init.len() as _;
+            result_ref.length = init.len() as u32 + 1;
             std::slice::from_raw_parts_mut(result_ref.data.as_mut_ptr(), init.len())
                 .copy_from_slice(init.as_bytes());
-
+            result_ref.data.as_mut_ptr().add(init.len()).write(0);
             result.assume_init()
         }
     }

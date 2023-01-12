@@ -155,7 +155,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     }
 
     #[inline]
-    pub fn clear_bit(&mut self, addr: usize) {
+    pub fn clear_bit(&self, addr: usize) {
         let (index, bit) = self.object_start_index_bit(addr);
         self.cell_atomic(index).fetch_and(!(1 << bit), Ordering::Relaxed);
         //self.bmp[index] &= !(1 << bit);

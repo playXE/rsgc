@@ -113,3 +113,14 @@ pub mod prelude {
     pub use heap::region::HeapArguments;
     pub use system::{object::*, traits::*};
 }
+
+cfg_if::cfg_if! {
+    if #[cfg(not(any(feature="gc-satb", feature="gc-incremental-update", feature="gc-passive")))] {
+        compile_error!("No GC mode selected, enable one of through features: gc-satb, gc-incremental-update, gc-passive");
+    } else if #[cfg(all(feature="gc-satb", not(feature="gc-incremental-update"), not(feature = "gc-passive")))] {
+    } else if #[cfg(all(feature="gc-incremental-update", not(feature="gc-satb"), not(feature = "gc-passive")))] {
+    } else if #[cfg(all(feature="gc-passive", not(feature="gc-satb"), not(feature = "gc-incremental-update")))] {
+    } else {
+        compile_error!("Multiple GC modes selected, enable only one of through features: gc-satb, gc-incremental-update, gc-passive");
+    }
+}

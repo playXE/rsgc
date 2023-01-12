@@ -296,7 +296,7 @@ impl ConcurrentGCThread for ControlThread {
 
             if gc_requested {
                 unsafe {
-                    if heap.options().always_full {
+                    if heap.options().always_full || cfg!(feature = "gc-passive") {
                         mode = GCMode::STWFull;
                     }
                     self.update_gc_id();

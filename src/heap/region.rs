@@ -336,6 +336,15 @@ impl HeapArguments {
             None => (),
         }
 
+        match read_uint_from_env("GC_LEARNING_STEPS") {
+            Some(x) => if x == 0 {
+                this.learning_steps = 1;
+            } else {
+                this.learning_steps = x;
+            }
+            None => ()
+        }
+
         this.heuristics = match std::env::var("GC_HEURISTICS") {
             Ok(x) => match x.to_lowercase().as_str() {
                 "adaptive" => GCHeuristic::Adaptive,

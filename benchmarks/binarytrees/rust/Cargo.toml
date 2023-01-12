@@ -6,9 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rsgc = { path = "../../../" }
+rsgc = { path = "../../../", default-features = false, features = ["gc-incremental-update"] } 
 parking_lot = "0.12"
-
+env_logger = "0.10"
 [[bin]]
 name = "binarytrees"
 path = "./binarytrees.rs"

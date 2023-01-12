@@ -142,7 +142,12 @@ impl Thread {
             // This means we collect garbage that was allocated *before* the cycle started
             // and thus all new objects should implicitly be marked as black. This has problem
             // of floating garbage but it significantly simplifies write barrier implementation.
-            (*self.mark_bitmap).set_bit(obj as _);
+
+            #[cfg(feature="gc-satb")]
+            {
+                // Need to maintain black-mutator invariant with SATB
+                (*self.mark_bitmap).set_bit(obj as _);
+            }
             Handle::from_raw(obj.add(1).cast())
         }
     }
@@ -172,8 +177,12 @@ impl Thread {
                 .cast::<usize>()
                 .write(length);
 
-            //debug_assert!((*self.mark_ctx).is_marked(obj as _));
-            (*self.mark_bitmap).atomic_test_and_set(obj as _);
+
+            #[cfg(feature="gc-satb")]
+            {
+                // Need to maintain black-mutator invariant with SATB
+                (*self.mark_bitmap).set_bit(obj as _);
+            }
             Handle::from_raw(obj.add(1).cast())
         }
     }
@@ -296,9 +305,23 @@ impl Thread {
         self.cm_in_progress = value;
     }
 
-    /// Yuasa deletion barrier implementation
+    
+    /// Raw implementation of write-barrier. 
+    /// 
+    /// If SATB mode is used this code will do Yuasa deletion write barrier that captures
+    /// writes to white objects. Note that this barrier is very conservative: it does not 
+    /// check colors of new values that are being written. 
+    /// 
+    /// In Incremental Update mode uses Steele's write barrier that captures black<-white writes.
+    /// This barrier is very conservative as well. Note that with IU mode concurrent mark termination 
+    /// might take longer.
+    /// 
+    /// In passive mode does nothing.
     #[inline]
     pub unsafe fn raw_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
+        // Yuasa deletion barrier implementation
+        // Capture white<-black writes
+        #[cfg(feature = "gc-satb")]
         if self.cm_in_progress {
             // Filter marked objects before hitting the SATB queues.
             if !(*self.mark_bitmap).check_bit(obj as _) {
@@ -307,7 +330,21 @@ impl Thread {
                 }
             }
         }
+
+        // Capture black<-white writes
+        #[cfg(feature = "gc-incremental-update")]
+        if self.cm_in_progress {
+            if (*self.mark_bitmap).check_bit(obj as _) {
+                // unmark object before putting to queue.
+                (*self.mark_bitmap).clear_bit(obj as _);
+                if !self.satb_mark_queue.try_enqueue(obj as _) {
+                    self.slow_write_barrier(obj);
+                }
+            }
+        }
     }
+
+
     #[inline(never)]
     #[cold]
     unsafe fn slow_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
@@ -320,7 +357,7 @@ impl Thread {
         for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
             let obj = self.satb_mark_queue.buf.add(i).read();
             // GC can do some progress in background and already mark object that was in SSB.
-            if !(*self.mark_ctx).is_marked(obj as _) {
+            if !(*self.mark_ctx).is_marked(obj as _) || cfg!(feature="gc-incremental-update") {
                 (*self.mark_ctx)
                     .mark_queues()
                     .injector()
