@@ -47,7 +47,10 @@ impl_simple!(
     f32 f64 
     u8 u16 u32 u64 u128
     i8 i16 i32 i64 i128 
-    isize usize 
+    isize usize char std::fs::File
+    std::net::TcpStream
+    std::net::UdpSocket
+    std::net::TcpListener
 );
 
 impl<T: Object> Object for Option<T> {
