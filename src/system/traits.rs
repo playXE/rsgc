@@ -53,6 +53,50 @@ impl_simple!(
     std::net::TcpListener
 );
 
+impl Object for fn() {}
+
+impl<R: 'static> Object for fn() -> R {}
+impl<A1: 'static, R: 'static> Object for fn(A1) -> R {}
+impl<A1: 'static, A2: 'static, R: 'static> Object for fn(A1, A2) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, R: 'static> Object for fn(A1, A2, A3) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, R: 'static> Object for fn(A1, A2, A3, A4) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7, A8) -> R {}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, A9: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R {}
+impl<R: 'static> Allocation for fn() -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, R: 'static> Allocation for fn(A1) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, R: 'static> Allocation for fn(A1, A2) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, R: 'static> Allocation for fn(A1, A2, A3) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7, A8) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, A9: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R {
+    const NO_HEAP_PTRS: bool = true;
+}
+
+
 impl<T: Object> Object for Option<T> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         if let Some(value) = self {
