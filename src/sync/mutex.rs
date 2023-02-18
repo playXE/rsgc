@@ -1,3 +1,7 @@
+//! A mutual exclusion primitive useful for protecting shared data that is safe to use with RSGC.
+//! 
+//! API is entirely copied from parking_lot.
+
 use crate::{
     heap::{safepoint, thread::Thread},
     thread::{safepoint_scope, safepoint_scope_conditional},

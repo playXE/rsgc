@@ -37,7 +37,7 @@ pub struct VTable {
     pub is_varsize: bool,
     /// Tells GC how to allocate and deal with variable-sized object. Read [VarSize] documentation for more detail.
     pub varsize: VarSize,
-    /// Tells GC how to trace object properties. Read [Trace] documentation for more detail.
+    /// Tells GC how to trace object properties. Read [Object] documentation for more detail.
     pub trace: fn(*mut (), visitor: &mut dyn Visitor),
     /// Tells GC how to destruct object.
     pub destructor: fn(*mut ()),
@@ -81,17 +81,53 @@ pub struct VT<T> {
     marker: PhantomData<*const T>,
 }
 
+
+/// Tells GC how to allocate objet on the heap. In the case of non-variable sized object you can simply 
+/// do `impl Allocation for MyObject {}` and it will work. For variable sized objects you need to specify
+/// additional information. See constants of this trait for more detail.
 pub trait Allocation: Object + Sized {
+    /// Does this object need to be finalized?
+    /// 
+    /// NOTE: Not used right now, reserved for future use.
     const FINALIZE: bool = false;
+    /// Does this object need to be destructed?
+    /// 
+    /// NOTE: Not used right now, reserved for future use.
     const DESTRUCTIBLE: bool = std::mem::needs_drop::<Self>();
+    /// The size of this object in bytes.
     const SIZE: usize = std::mem::size_of::<Self>();
+    /// Is this object variable sized? If so, GC will actually use [VARSIZE_ITEM_SIZE] and [VARSIZE_OFFSETOF_CAPACITY] and [SIZE] constants to determine object size. 
     const VARSIZE: bool = false;
+    /// Size of item in a variable sized object
     const VARSIZE_ITEM_SIZE: usize = 0;
+    /// Offset of length field in a variable sized object. Used by GC to trace array chunks in parallel.
+    /// 
+    /// Note that the field must be `u32`. GC does not support lengths larger than `u32::MAX`. Can be equal to `VARSIZE_OFFSETOF_CAPACITY` if 
+    /// your object is immutable in terms of length.
     const VARSIZE_OFFSETOF_LENGTH: usize = 0;
+    /// Offset of capacity field in a variable sized object. Used by GC to determine object size.
+    /// 
+    /// Note that the field must be `u32`. GC does not support lengths larger than `u32::MAX`.
     const VARSIZE_OFFSETOF_CAPACITY: usize = 0;
+
+    /// Offset of variable part of object. Used by GC to get pointer to variable part of object.
+    /// 
+    /// Must be the last field of the object like:
+    /// ```
+    /// #[repr(C)]
+    /// struct Array {
+    ///     length: u32,
+    ///     _pad: [u8; 4],
+    ///     data: [u8; 0],
+    /// }
+    /// ```
     const VARSIZE_OFFSETOF_VARPART: usize = 0;
+
+    /// Does this object contain any heap pointers?
     const NO_HEAP_PTRS: bool = false && !Self::VARSIZE_NO_HEAP_PTRS;
+    /// Does this object contain any heap pointers in a variable-sized part of it?
     const VARSIZE_NO_HEAP_PTRS: bool = false;
+    /// Pointer to user vtable. 
     const USER_VTABLE: *const () = core::ptr::null();
 }
 
@@ -220,7 +256,7 @@ pub type VisitedTag = BitField<1, VISITED, false>;
 pub type NoHeapPtrsTag = BitField<1, NO_GC_PTRS, false>;
 pub type FinalizationOrderingTag = BitField<1, FINALIZATION_ORDERING, false>;
 
-/// ObjectHeader contains meta data per object and is prepended to each
+/// HeapObjectHeader contains meta data per object and is prepended to each
 /// object.
 ///
 /// It stores this data:
@@ -402,6 +438,17 @@ impl HeapObjectHeader {
     }
 }
 
+
+/// A garbage collected pointer to a value.
+///
+/// This is the equivalent of a garbage collected smart-pointer.
+/// 
+/// The smart pointer is simply a guarantee to the garbage collector
+/// that this points to a garbage collected object with the correct header,
+/// and not some arbitrary bits that you've decided to heap allocate.
+///
+/// ## Safety
+/// A `Handle` can be safely transmuted back and forth from its corresponding pointer.
 pub struct Handle<T: Object + ?Sized> {
     pub(crate) ptr: NonNull<u8>,
     marker: PhantomData<NonNull<T>>,
@@ -411,11 +458,13 @@ unsafe impl<T: Send + Object + ?Sized> Send for Handle<T> {}
 unsafe impl<T: Sync + Object + ?Sized> Sync for Handle<T> {}
 
 impl<T: Object + ?Sized> Handle<T> {
+    /// Get a raw pointer to the allocation. This is the same as `as_ptr`.
     #[inline]
     pub fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
     }
 
+    /// Get immutable reference to value of type `T`. 
     #[inline]
     pub fn as_ref(&self) -> &T
     where
@@ -424,6 +473,7 @@ impl<T: Object + ?Sized> Handle<T> {
         unsafe { self.ptr.cast::<T>().as_ref() }
     }
 
+    /// Get mutable reference to value of type `T`.
     #[inline]
     pub fn as_mut(&mut self) -> &'_ mut T
     where
@@ -432,6 +482,7 @@ impl<T: Object + ?Sized> Handle<T> {
         unsafe { self.ptr.cast().as_mut() }
     }
 
+    /// Construct a `Handle` from a raw pointer.
     #[inline]
     pub unsafe fn from_raw(mem: *mut u8) -> Self {
         Self {
@@ -440,6 +491,7 @@ impl<T: Object + ?Sized> Handle<T> {
         }
     }
 
+    /// Get the vtable for this object.
     #[inline]
     pub fn vtable(&self) -> &'static VTable {
         unsafe {
@@ -448,6 +500,8 @@ impl<T: Object + ?Sized> Handle<T> {
         }
     }
 
+    /// Cast this handle to a dyn handle. Note that it is not a fat-pointer. RTTI required
+    /// to downcast back to a concrete type is stored in GC header *behind* the object. 
     #[inline]
     pub fn as_dyn(this: &Self) -> Handle<dyn Object> {
         Handle {
@@ -456,15 +510,20 @@ impl<T: Object + ?Sized> Handle<T> {
         }
     }
 
+
+    /// Check if this handle is a handle to an object of type `U`.
     #[inline]
     pub fn is<U: Object + ?Sized + 'static>(&self) -> bool {
         self.vtable().type_id == TypeId::of::<U>()
     }
+
+    /// Compares equality of two handles. This is a pointer equality check.
     #[inline]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.ptr == other.ptr
     }
 
+    /// Replace the value of this handle with another value.
     #[inline]
     pub fn replace(&mut self, other: T) -> T
     where T: Sized
@@ -474,6 +533,8 @@ impl<T: Object + ?Sized> Handle<T> {
 }
 
 impl Handle<dyn Object> {
+
+    /// Downcast this handle to a handle of type `U`.
     pub fn downcast<U: Object + Sized + 'static>(self) -> Option<Handle<U>> {
         if self.vtable().type_id == TypeId::of::<U>() {
             Some(Handle {
@@ -485,6 +546,7 @@ impl Handle<dyn Object> {
         }
     }
 
+    /// Downcast this handle to a reference of type `U`.
     pub fn downcast_ref<U: Object + Sized + 'static>(&self) -> Option<&U> {
         if self.vtable().type_id == TypeId::of::<U>() {
             Some(unsafe { self.ptr.cast::<U>().as_ref() })
@@ -493,6 +555,7 @@ impl Handle<dyn Object> {
         }
     }
 
+    /// Downcast this handle to a mutable reference of type `U`.
     pub fn downcast_mut<U: Object + Sized + 'static>(&mut self) -> Option<&mut U> {
         if self.vtable().type_id == TypeId::of::<U>() {
             Some(unsafe { self.ptr.cast::<U>().as_mut() })
@@ -503,6 +566,7 @@ impl Handle<dyn Object> {
 }
 
 impl<T: Object + Sized> Handle<MaybeUninit<T>> {
+    /// Assume that the value is initialized and returns a handle to it.
     pub unsafe fn assume_init(self) -> Handle<T> {
         Handle {
             ptr: self.ptr,

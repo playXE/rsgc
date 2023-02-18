@@ -153,6 +153,8 @@ impl Thread {
     }
 
     /// Allocates variably sized object on the heap.
+    /// 
+    /// Note that `length` field is automatically written at [Allocation::VARSIZE_OFFSETOF_CAPACITY]. 
     pub fn allocate_varsize<T: 'static + Allocation>(
         &mut self,
         length: usize,
@@ -187,6 +189,11 @@ impl Thread {
         }
     }
 
+    /// Allocates raw memory, unsafe to use outside of RSGC impl itself. 
+    /// 
+    /// ## TODO
+    /// 
+    /// I should really update it to include all code to properly tell GC that we allocated something, right now it is done in `allocate` and `allocate_varsize` but it should be done here.
     #[inline]
     pub unsafe fn allocate_raw(&mut self, size: usize) -> *mut u8 {
         let mem = self.alloc_inside_tlab_fast(size);
@@ -293,7 +300,7 @@ impl Thread {
     }
 
     /// SATB write barrier. Ensures that object processes all references correctly.
-    /// Must be inserted after write to `handle`.
+    /// Must be inserted before write to `handle`.
     #[inline]
     pub fn write_barrier<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
         unsafe {
@@ -516,13 +523,21 @@ impl Thread {
         !self.safepoint.is_null() && unsafe { self.safepoint != &mut SINK }
     }
 
+    /// Returns current thread. 
     pub fn current() -> &'static mut Thread {
         unsafe {
             &mut THREAD
         }
     }
 
-    pub fn get_registers(&self) -> (*mut u8, usize) {
+    /// Returns registers for current thread. This is used by GC to trace current registers.
+    /// 
+    /// # Safety
+    /// 
+    /// Can return invalid pointer or null. Must be used only by GC and only when roots are traced.
+    /// 
+    /// Should not be used outside of RSGC.
+    pub unsafe fn get_registers(&self) -> (*mut u8, usize) {
         (
             self.platform_registers.cast(),
             size_of::<PlatformRegisters>() / size_of::<usize>(),
@@ -556,6 +571,9 @@ impl Drop for UnsafeScope {
     }
 }
 
+/// Enters safepoint scope. This means that current thread is in "safe" state and GC can run. 
+/// 
+/// Note that `cb` MUST not invoke any GC code or access GC objects otherwise UB will happen.
 pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R {
     let mut thread = Thread::current();
     unsafe {
@@ -587,6 +605,9 @@ pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R 
 }
 
 
+/// Enters safepoint scope. This means that current thread is in "safe" state and GC can run. 
+/// 
+/// Note that `cb` MUST not invoke any GC code or access GC objects otherwise UB will happen.
 pub fn safepoint_scope<R>(cb: impl FnOnce() -> R) -> R {
     safepoint_scope_conditional(true, cb)
 }
@@ -699,6 +720,9 @@ pub(crate) fn threads() -> &'static Threads {
 
 pub struct OOM(pub usize);
 
+/// Spawns main GC thread and runs `callback` on it.
+/// 
+/// Note that this function does not terminate until all mutator threads are terminated and GC is stopped.
 pub fn main_thread<R>(args: HeapArguments, callback: impl FnOnce(&mut Heap) -> Result<R, Box<dyn std::error::Error>> + UnwindSafe) -> Result<R, Box<dyn std::error::Error>> {
     let heap = Heap::new(args);
     Thread::current().register();
@@ -721,6 +745,7 @@ pub fn main_thread<R>(args: HeapArguments, callback: impl FnOnce(&mut Heap) -> R
     }
 }
 
+/// Spawns new thread and registers it with GC.
 pub fn spawn_thread<F, R>(cb: F) -> GCAwareJoinHandle<R>
 where
     F: 'static + FnOnce() -> R + Send + UnwindSafe,
@@ -759,6 +784,7 @@ impl<R> GCAwareJoinHandle<R> {
 }
 
 pub mod scoped {
+    //! Scoped mutator threads.
     use std::{
         marker::PhantomData,
         panic::{AssertUnwindSafe, UnwindSafe},

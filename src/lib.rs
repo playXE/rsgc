@@ -1,3 +1,18 @@
+//! # RSGC
+//! 
+//! RSGC is a garbage collector for Rust. It is designed to be used for languge runtimes. 
+//! 
+//! RSGC is concurrent and conservative-on-stack precise on heap garbage collector. 
+//! 
+//! For example usage see `examples` directory or implementations of basic types in `src/system` directory.
+//! 
+//! ## Features
+//! - Conservative on stack garbage collection, no need to register your pointers precisely.
+//! - Concurrent garbage collection, mutators are stoped only for small period of time.
+//! - Small latency, usually less than 20ms. 
+//! - A lot of tuning options. You can choose different region sizes, different GC heuristics, configure GC threads, etc.
+//! - Supports multiple mutators (threads) running and allocating at the same time.
+
 #![feature(
     const_type_id,
     const_refs_to_cell,

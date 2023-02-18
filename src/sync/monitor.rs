@@ -2,6 +2,10 @@ use std::{time::Instant, ops::{Deref, DerefMut}};
 
 use super::mutex::{Mutex, Condvar, MutexGuard, WaitTimeoutResult};
 
+
+/// A monitor is a synchronization primitive that can be used to protect shared data from concurrent access.
+/// 
+/// It combines a mutex and a condition variable.
 pub struct Monitor<T> {
     mutex: Mutex<T>,
     cv: Condvar

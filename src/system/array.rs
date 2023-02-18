@@ -4,6 +4,10 @@ use super::traits::*;
 use crate::heap::{thread::*, AllocError};
 use super::object::*;
 use std::{mem::size_of, ops::{Deref, DerefMut}, hash::Hash};
+
+/// GC allocated immutable array.
+/// 
+/// It derefs to `[T]` so you can use it just as a regular slice.
 #[repr(C)]
 pub struct Array<T: Object + Sized> {
     length: u32,
@@ -12,6 +16,7 @@ pub struct Array<T: Object + Sized> {
 }
 
 impl<T: 'static + Object + Sized> Array<T> {
+    /// Create a new array with the given length. Invokes `init` to produce the element at each index.
     pub fn new(th: &mut Thread, len: usize, mut init: impl FnMut(&mut Thread, usize) -> T) -> Handle<Self> where T: Allocation {
         let mut result = th.allocate_varsize::<Self>(len);
         let arr = result.as_mut().as_mut_ptr();
