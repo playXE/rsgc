@@ -9,7 +9,7 @@ use crate::system::object::*;
 /// ## Safety
 /// See the documentation of the `trace` method for more info.
 /// Essentially, this object must faithfully trace anything that
-/// could contain garbage collected pointers or other `Trace` items.
+/// could contain garbage collected pointers or other `Object` items.
 pub trait Object: 'static {
 
     /// Trace each field in this type.
@@ -24,7 +24,7 @@ pub trait Object: 'static {
     /// Behavior is restricted during tracing:
     /// ## Permitted Behavior
     /// - Reading your own memory (includes iteration)
-    ///   - Interior mutation is undefined behavior, even if you use `GcCell`
+    ///   - Interior mutation is undefined behavior, even if you use `RefCell`
     /// - Calling `Visitor::visit`
     /// - Calling [Object::trace] on other objects
     /// ## Never Permitted Behavior
