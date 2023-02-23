@@ -248,7 +248,6 @@ where
         self.mod_count += 1;
         self.size += 1;
         if self.size > self.threshold {
-            println!("{} > {}", self.size, self.threshold);
             self.resize();
         }
 
@@ -260,7 +259,7 @@ where
 
         let old_tab = self.table;
         let old_cap = old_tab.as_ref().map(|tab| tab.len()).unwrap_or(0) as u32;
-        let mut new_cap;
+        let new_cap;
         let mut new_thr = 0;
         let old_thr = self.threshold;
         if old_cap > 0 {
@@ -292,7 +291,7 @@ where
         let mut newtab = Array::new(thread, new_cap as _, |_, _| None);
         thread.write_barrier(*self);
         self.table = Some(newtab);
-        println!("resize: {} -> {}", old_cap, new_cap);
+        
         if let Some(mut old_tab) = old_tab {
             for j in 0..old_cap {
                 let mut e = old_tab[j as usize];
