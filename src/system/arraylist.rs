@@ -128,6 +128,56 @@ impl<T: Object + Allocation> ArrayList<T> {
         Self::with_capacity(thread, 0)
     }
 
+    pub fn from_slice(thread: &mut Thread, slice: &[T]) -> Self 
+    where T: Clone
+    {
+        let mut this = Self::with_capacity(thread, slice.len());
+        for val in slice {
+            this.push(thread, val.clone());
+        }
+        this
+    }
+
+    pub fn from_slice_with_capacity(thread: &mut Thread, slice: &[T], capacity: usize) -> Self 
+    where T: Clone
+    {
+        let mut this = Self::with_capacity(thread, slice.len().max(capacity));
+        for val in slice {
+            this.push(thread, val.clone());
+        }
+        this
+    }
+
+    pub fn from_iter(thread: &mut Thread, iter: impl IntoIterator<Item = T>) -> Self {
+        let mut this = Self::new(thread);
+        for val in iter {
+            this.push(thread, val);
+        }
+        this
+    }
+
+    pub fn from_init(thread: &mut Thread, len: usize, init: T) -> Self
+    where
+        T: Clone,
+    {
+        let mut this = Self::with_capacity(thread, len);
+        for _ in 0..len {
+            this.push(thread, init.clone());
+        }
+        this
+    }
+
+    pub fn from_init_with_capacity(thread: &mut Thread, len: usize, init: T, capacity: usize) -> Self
+    where
+        T: Clone,
+    {
+        let mut this = Self::with_capacity(thread, len.max(capacity));
+        for _ in 0..len {
+            this.push(thread, init.clone());
+        }
+        this
+    }
+
     pub fn split_off(&mut self, thread: &mut Thread, at: usize) -> Self {
         let mut other = Self::with_capacity(thread, self.len() - at);
         for i in at..self.len() {
