@@ -76,45 +76,102 @@ pub struct HeapArguments {
     pub humongous_threshold: usize,
     /// Static heap region size. Set zero to enable automatic sizing.
     pub region_size: usize,
+    /// Enable Elastic TLABs. Elastic TLABs are TLABs that have dynamic size, from [min_tlab_size](HeapArguments::min_tlab_size) to 
+    /// [tlab_size](HeapArguments::tlab_size). Elastic TLABs are enabled by default.
     pub elastic_tlab: bool,
+    /// Minimum TLAB size.
     pub min_tlab_size: usize,
+    /// TLAB size specified by user, if set to 0 then determined automatically (1/8 of a region usually).
     pub tlab_size: usize,
     pub tlab_waste_target_percent: usize,
     pub tlab_refill_waste_fraction: usize,
     pub tlab_waste_increment: usize,
+    /// Maximum heap size in bytes. 
     pub max_heap_size: usize,
+    /// Minimum heap size in bytes.
     pub min_heap_size: usize,
+    /// Initial heap size in bytes. It is number of bytes that are commited at the start of the program.
     pub initial_heap_size: usize,
+    /// Minimum free bytes in the heap before GC is triggered.
     pub min_free_threshold: usize,
+    /// Allocation threshold in bytes. If allocation threshold is reached, GC is triggered.
     pub allocation_threshold: usize,
+    /// Interval between *guaranteed* GC cycles in milliseconds.
     pub guaranteed_gc_interval: usize,
+    /// How much controller thread will sleep before checking if GC is needed.
     pub control_interval_min: usize,
+    /// Maximum interval for controller thread to sleep.
     pub control_interval_max: usize,
+    /// How much to adjust the interval for sleeping between GC checks.
     pub control_interval_adjust_period: usize,
+    /// Enable uncommit of unused regions.
     pub uncommit: bool,
+    /// Uncommit region only if it was unused for this many milliseconds.
     pub uncommit_delay: usize,
     /// How many regions to process at once during parallel region
     /// iteration. Affects heaps with lots of regions.
     pub parallel_region_stride: usize,
+    /// How many threads to use for parallel GC.
     pub parallel_gc_threads: usize,
+    /// Minimum percentage of real memory used for maximum heap
+    /// size on systems with small physical memory size
     pub min_ram_percentage: f64,
+    /// Maximum percentage of real memory used for maximum heap size.
     pub max_ram_percentage: f64,
+    /// Percentage of real memory used for initial heap size
     pub initial_ram_percentage: f64,
+    /// Enable parallel mark.
     pub parallel_mark: bool,
+    /// Enable parallel sweep.
     pub parallel_sweep: bool,
+    /// How many items to process during one marking iteration before 
+    /// checking for cancellation, yielding, etc. Larger values improve
+    /// marking performance at expense of responsiveness. (default: 1000)
     pub mark_loop_stride: usize,
+    /// Unused for now. How much times SATB buffers can be flushed before triggering STW.
     pub max_satb_buffer_flushes: usize,
+    /// Number of entries in an SATB log buffer. Default is 1024.
     pub max_satb_buffer_size: usize,
+    /// Deprecated, CMS failure always triggers Full GC. 
+    /// How many Degenarate GC cycles can be triggered before triggering Full GC.
     pub full_gc_threshold: usize,
     /// Always do full GC cycle.
     pub always_full: bool,
+    /// The decay factor (alpha) used for values in the weighted
+    /// moving average of cycle time and allocation rate. 
+    /// Larger values give more weight to recent values.
+    /// 
+    /// Default: 0.5
     pub adaptive_decay_factor: f64,
+    /// The number of cycles some heuristics take to collect in order 
+    /// to learn application and GC performance. 
     pub learning_steps: usize,
+
+    /// The cycle may shortcut when enough garbage can be reclaimed 
+    /// from the immediate garbage (completely garbage regions).
+    /// In percents of total garbage found. Setting this threshold 
+    /// to 100 effectively disables the shortcut.
     pub immediate_threshold: usize,
+    /// The number of times per second to update the allocation rate moving average 
     pub adaptive_sample_frequency_hz: usize,
+    /// The size of the moving window over which the average allocation rate is maintained. 
+    /// The total number of samples is the product of this number and the sample frequency.
     pub adaptive_sample_frequency_size_seconds: usize,
+    /// The number of standard deviations used to determine an initial
+    /// margin of error for the average cycle time and average 
+    /// llocation rate. Increasing this value will cause the 
+    /// heuristic to initiate more concurrent cycles.
     pub adaptive_initial_confidence: f64,
+    /// If the most recently sampled allocation rate is more than 
+    /// this many standard deviations away from the moving average, 
+    /// then a cycle is initiated. This value controls how sensitive 
+    /// the heuristic is to allocation spikes. Decreasing this number 
+    /// ncreases the sensitivity. 
     pub adaptive_initial_spike_threshold: f64,
+    /// How much of heap should some heuristics reserve for absorbing 
+    /// the allocation spikes. Larger value wastes more memory in 
+    /// non-emergency cases, but provides more safety in emergency 
+    /// cases. In percents of max heap size.
     pub alloc_spike_factor: usize,
 
     /// GC heuristics to use. This fine-tunes the GC mode selected,

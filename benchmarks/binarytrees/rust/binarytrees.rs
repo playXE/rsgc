@@ -49,10 +49,12 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
             right: None,
         });
 
+        let left = create_tree(thread, depth - 1);
+        let right = create_tree(thread, depth - 1);
+
         thread.write_barrier(node);
-        node.left = Some(create_tree(thread, depth - 1));
-        thread.write_barrier(node);
-        node.right = Some(create_tree(thread, depth - 1));
+        node.left = Some(left);
+        node.right = Some(right);
 
         node 
     } else {
@@ -64,6 +66,7 @@ fn create_tree(thread: &mut Thread, depth: i64) -> Handle<TreeNode> {
 
         thread.allocate(node)
     };
+    
     
     node
 }

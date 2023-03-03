@@ -6,10 +6,11 @@ use std::{
     mem::{size_of, MaybeUninit},
     panic::{AssertUnwindSafe, UnwindSafe},
     ptr::{null, null_mut},
-    sync::atomic::{AtomicI8, AtomicUsize, Ordering, AtomicU64},
+    sync::atomic::{AtomicI8, AtomicU64, AtomicUsize, Ordering},
     thread::{JoinHandle, ThreadId},
 };
 
+use crate::heap::tlab::ThreadLocalAllocBuffer;
 use crate::{
     formatted_size,
     heap::{align_down, mark::MarkTask, stack::approximate_stack_pointer},
@@ -27,7 +28,6 @@ use crate::{
         machine_context::{registers_from_ucontext, PlatformRegisters},
     },
 };
-use crate::{heap::tlab::ThreadLocalAllocBuffer, utils::ptr_queue::PtrQueueImpl};
 
 use super::{
     align_usize,
@@ -124,7 +124,7 @@ impl Thread {
     }
 
     /// Allocates fixed sized object on the heap.
-    pub fn allocate<T: 'static + Allocation>(&mut self, value: T) -> Handle<T>{
+    pub fn allocate<T: 'static + Allocation>(&mut self, value: T) -> Handle<T> {
         unsafe {
             let size = align_usize(T::SIZE + size_of::<HeapObjectHeader>(), 16);
             let mem = self.allocate_raw(size);
@@ -143,7 +143,7 @@ impl Thread {
             // and thus all new objects should implicitly be marked as black. This has problem
             // of floating garbage but it significantly simplifies write barrier implementation.
 
-            #[cfg(feature="gc-satb")]
+            #[cfg(feature = "gc-satb")]
             {
                 // Need to maintain black-mutator invariant with SATB
                 (*self.mark_bitmap).set_bit(obj as _);
@@ -153,8 +153,8 @@ impl Thread {
     }
 
     /// Allocates variably sized object on the heap.
-    /// 
-    /// Note that `length` field is automatically written at [Allocation::VARSIZE_OFFSETOF_CAPACITY]. 
+    ///
+    /// Note that `length` field is automatically written at [Allocation::VARSIZE_OFFSETOF_CAPACITY].
     pub fn allocate_varsize<T: 'static + Allocation>(
         &mut self,
         length: usize,
@@ -179,8 +179,7 @@ impl Thread {
                 .cast::<usize>()
                 .write(length);
 
-
-            #[cfg(feature="gc-satb")]
+            #[cfg(feature = "gc-satb")]
             {
                 // Need to maintain black-mutator invariant with SATB
                 (*self.mark_bitmap).set_bit(obj as _);
@@ -189,10 +188,10 @@ impl Thread {
         }
     }
 
-    /// Allocates raw memory, unsafe to use outside of RSGC impl itself. 
-    /// 
+    /// Allocates raw memory, unsafe to use outside of RSGC impl itself.
+    ///
     /// ## TODO
-    /// 
+    ///
     /// I should really update it to include all code to properly tell GC that we allocated something, right now it is done in `allocate` and `allocate_varsize` but it should be done here.
     #[inline]
     pub unsafe fn allocate_raw(&mut self, size: usize) -> *mut u8 {
@@ -246,7 +245,7 @@ impl Thread {
         self.tlab.retire(self.id);
 
         let tlab_size = self.max_tlab_size;
-        let mut req = AllocRequest::new(super::AllocType::ForLAB, 2 * 1024, tlab_size);
+        let mut req = AllocRequest::new(super::AllocType::ForLAB, heap().options().min_tlab_size, tlab_size);
         let mem = heap().allocate_memory(&mut req);
 
         if mem.is_null() {
@@ -312,17 +311,16 @@ impl Thread {
         self.cm_in_progress = value;
     }
 
-    
-    /// Raw implementation of write-barrier. 
-    /// 
+    /// Raw implementation of write-barrier.
+    ///
     /// If SATB mode is used this code will do Yuasa deletion write barrier that captures
-    /// writes to white objects. Note that this barrier is very conservative: it does not 
-    /// check colors of new values that are being written. 
-    /// 
+    /// writes to white objects. Note that this barrier is very conservative: it does not
+    /// check colors of new values that are being written.
+    ///
     /// In Incremental Update mode uses Steele's write barrier that captures black<-white writes.
-    /// This barrier is very conservative as well. Note that with IU mode concurrent mark termination 
+    /// This barrier is very conservative as well. Note that with IU mode concurrent mark termination
     /// might take longer.
-    /// 
+    ///
     /// In passive mode does nothing.
     #[inline]
     pub unsafe fn raw_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
@@ -351,7 +349,6 @@ impl Thread {
         }
     }
 
-
     #[inline(never)]
     #[cold]
     unsafe fn slow_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
@@ -359,19 +356,24 @@ impl Thread {
         self.raw_write_barrier(obj);
     }
 
-    pub(crate) unsafe fn flush_ssb(&mut self) {
+    /// Flush SSB queue. This function is called when SSB queue is full.
+    /// 
+    /// Writes are pushed to global SATB queue. If object is already marked it is not pushed to SATB queue.
+    pub fn flush_ssb(&mut self) {
         let heap = heap();
-        for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
-            let obj = self.satb_mark_queue.buf.add(i).read();
-            // GC can do some progress in background and already mark object that was in SSB.
-            if !(*self.mark_ctx).is_marked(obj as _) || cfg!(feature="gc-incremental-update") {
-                (*self.mark_ctx)
-                    .mark_queues()
-                    .injector()
-                    .push(MarkTask::new(obj as _, false, false));
+        unsafe {
+            for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
+                let obj = self.satb_mark_queue.buf.add(i).read();
+                // GC can do some progress in background and already mark object that was in SSB.
+                if !(*self.mark_ctx).is_marked(obj as _) || cfg!(feature = "gc-incremental-update")
+                {
+                    (*self.mark_ctx)
+                        .mark_queues()
+                        .injector()
+                        .push(MarkTask::new(obj as _, false, false));
+                }
             }
         }
-
         self.satb_mark_queue
             .set_index(heap.options().max_satb_buffer_size);
     }
@@ -514,7 +516,9 @@ impl Thread {
         let state = self.gc_state;
         self.atomic_gc_state()
             .store(GC_STATE_WAITING, Ordering::Release);
-        super::safepoint::wait_gc();
+        unsafe {
+            super::safepoint::wait_gc();
+        }
         self.atomic_gc_state().store(state, Ordering::Release);
     }
 
@@ -523,19 +527,17 @@ impl Thread {
         !self.safepoint.is_null() && unsafe { self.safepoint != &mut SINK }
     }
 
-    /// Returns current thread. 
+    /// Returns current thread.
     pub fn current() -> &'static mut Thread {
-        unsafe {
-            &mut THREAD
-        }
+        unsafe { &mut THREAD }
     }
 
     /// Returns registers for current thread. This is used by GC to trace current registers.
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// Can return invalid pointer or null. Must be used only by GC and only when roots are traced.
-    /// 
+    ///
     /// Should not be used outside of RSGC.
     pub unsafe fn get_registers(&self) -> (*mut u8, usize) {
         (
@@ -571,8 +573,8 @@ impl Drop for UnsafeScope {
     }
 }
 
-/// Enters safepoint scope. This means that current thread is in "safe" state and GC can run. 
-/// 
+/// Enters safepoint scope. This means that current thread is in "safe" state and GC can run.
+///
 /// Note that `cb` MUST not invoke any GC code or access GC objects otherwise UB will happen.
 pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R {
     let mut thread = Thread::current();
@@ -604,16 +606,15 @@ pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R 
     }
 }
 
-
-/// Enters safepoint scope. This means that current thread is in "safe" state and GC can run. 
-/// 
+/// Enters safepoint scope. This means that current thread is in "safe" state and GC can run.
+///
 /// Note that `cb` MUST not invoke any GC code or access GC objects otherwise UB will happen.
 pub fn safepoint_scope<R>(cb: impl FnOnce() -> R) -> R {
     safepoint_scope_conditional(true, cb)
 }
 
 static mut SINK: u8 = 0;
-/* 
+/*
 thread_local! {
     static THREAD: UnsafeCell<Thread> = UnsafeCell::new(
         Thread {
@@ -721,9 +722,12 @@ pub(crate) fn threads() -> &'static Threads {
 pub struct OOM(pub usize);
 
 /// Spawns main GC thread and runs `callback` on it.
-/// 
+///
 /// Note that this function does not terminate until all mutator threads are terminated and GC is stopped.
-pub fn main_thread<R>(args: HeapArguments, callback: impl FnOnce(&mut Heap) -> Result<R, Box<dyn std::error::Error>> + UnwindSafe) -> Result<R, Box<dyn std::error::Error>> {
+pub fn main_thread<R>(
+    args: HeapArguments,
+    callback: impl FnOnce(&mut Heap) -> Result<R, Box<dyn std::error::Error>> + UnwindSafe,
+) -> Result<R, Box<dyn std::error::Error>> {
     let heap = Heap::new(args);
     Thread::current().register();
     let res = std::panic::catch_unwind(|| callback(super::heap::heap()));

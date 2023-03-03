@@ -30,7 +30,7 @@ pub fn addr_in_safepoint(addr: usize) -> bool {
     SAFEPOINT_PAGE.contains(addr)
 }
 
-pub fn enable() {
+pub(crate) fn enable() {
     if SAFEPOINT_ENABLE_CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) != 0 {
         return;
     }
@@ -45,7 +45,7 @@ pub fn enable() {
         pageaddr.write(1);
     }
 }
-pub fn disable() {
+pub(crate) fn disable() {
     if SAFEPOINT_ENABLE_CNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1 != 0 {
         return;
     }
@@ -62,13 +62,13 @@ pub fn disable() {
     }
 }
 
-pub fn init() {
+pub(crate) fn init() {
     let addr = SAFEPOINT_PAGE.address();
     log::info!("safepoint page: {:p}", addr);
     install_signal_handlers();
 }
 
-pub fn enter() -> bool {
+pub(crate) fn enter() -> bool {
     let guard = SAFEPOINT_LOCK.lock();
 
     match GC_RUNNING.compare_exchange(0, 1, Ordering::Relaxed, Ordering::SeqCst) {
@@ -78,7 +78,7 @@ pub fn enter() -> bool {
             true
         }
 
-        Err(_) => {
+        Err(_) => unsafe {
             // In case multiple threads enter the GC at the same time, only allow
             // one of them to actually run the collection. We can't just let the
             // master thread do the GC since it might be running unmanaged code
@@ -90,7 +90,7 @@ pub fn enter() -> bool {
     }
 }
 
-pub fn end() {
+pub(crate) fn end() {
     let guard = SAFEPOINT_LOCK.lock();
 
     disable();
@@ -99,7 +99,12 @@ pub fn end() {
     SAFEPOINT_COND.notify_all();
 }
 
-pub fn wait_gc() {
+/// Wait for the GC to finish.
+/// 
+/// # Safety
+/// 
+/// Must be invoked only from GC code, exposed to public only for potential VM implementations to use different STW mechanisms.
+pub unsafe fn wait_gc() {
     while GC_RUNNING.load(Ordering::Relaxed) != 0 || GC_RUNNING.load(Ordering::Acquire) != 0 {
         let mut guard = SAFEPOINT_LOCK.lock();
         if GC_RUNNING.load(Ordering::Relaxed) != 0 {
@@ -116,7 +121,7 @@ pub const SAFEPOINT_SYNCHRONIZED: u8 = 2;
 
 static SAFEPOINT_STATE: AtomicU8 = AtomicU8::new(0);
 
-pub struct SafepointSynchronize {}
+pub(crate) struct SafepointSynchronize {}
 
 impl SafepointSynchronize {
     pub(crate) unsafe fn begin() -> MutexGuard<'static, Vec<*mut Thread>> {

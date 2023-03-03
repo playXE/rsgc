@@ -75,10 +75,12 @@ impl RootSet {
     }
 }
 
+/// A `Root` is a trait describing how to collect roots for a GC.
 pub trait Root: Send + Sync {
     fn name(&self) -> &str;
     fn abbreviated_name(&self) -> &str;
 
+    /// Execute the root collection.
     fn execute(&self, processor: &mut ThreadRootProcessor);
 }
 
@@ -202,6 +204,7 @@ unsafe impl Send for ThreadRootProcessor<'_> {}
 unsafe impl Sync for ThreadRootProcessor<'_> {}
 
 
+/// A simple root that can be used to collect roots from a closure.
 pub struct SimpleRoot {
     name: &'static str,
     abbreviated_name: &'static str,

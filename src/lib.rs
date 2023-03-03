@@ -30,17 +30,6 @@
 
 use std::{cell::UnsafeCell, sync::atomic::AtomicPtr};
 
-pub const MEM_KIND_DYNAMIC: i32 = 0;
-pub const MEM_KIND_RAW: i32 = 1;
-pub const MEM_KIND_NOPTR: i32 = 2;
-pub const MEM_KIND_FINALIZE: i32 = 3;
-pub const MEM_ALIGN_DOUBLE: i32 = 128;
-pub const MEM_ZERO: i32 = 256;
-
-pub const fn mem_has_ptr(p: i32) -> bool {
-    (!(p & 2)) != 0
-}
-
 pub mod bitfield;
 pub mod env;
 pub mod heap;
