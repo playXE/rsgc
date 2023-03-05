@@ -123,7 +123,9 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     #[inline(always)]
     pub fn cell_atomic(&self, index: usize) -> &AtomicU8 {
         unsafe {
-            &*self.bmp.add(index).cast::<AtomicU8>()
+            assert!(!self.bmp.add(index).is_null());
+            debug_assert!(self.bmp.add(index) < self.bmp.add(self.size), "bitmap index out of bounds: {} {}", index, self.size);
+            self.bmp.add(index).cast::<AtomicU8>().as_ref().unwrap()
         }
     }
 
@@ -163,13 +165,14 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
 
     #[inline]
     pub fn check_bit(&self, addr: usize) -> bool {
-        debug_assert!(is_aligned(addr, ALIGN));
+        debug_assert!(is_aligned(addr, ALIGN), "not aligned: {:x}", addr);
         let (index, bit) = self.object_start_index_bit(addr);
         (self.cell_atomic(index).load(Ordering::Relaxed) & (1 << bit)) != 0
     }
 
     #[inline(always)]
     pub fn object_start_index_bit(&self, addr: usize) -> (usize, usize) {
+        debug_assert!(heap().is_in(addr as _), "addr is not in heap: {:x} (heap region: {:p}->{:p}) tag: {}", addr, heap().mem_start() as *mut u8, heap().mem_end() as *mut u8, unsafe { ((addr) as *const u8).read() });
         let object_offset = addr.wrapping_sub(self.offset);
         let object_start_number = object_offset / ALIGN;
 
@@ -284,7 +287,7 @@ impl<const ALIGN: usize> HeapBitmap<ALIGN> {
     pub fn atomic_test_and_set(&self, addr: usize) -> bool {
         let (index, bit) = self.object_start_index_bit(addr);
         let cell = self.cell_atomic(index);
-
+       
         let mut old_val = cell.load(Ordering::Relaxed);
 
         loop {

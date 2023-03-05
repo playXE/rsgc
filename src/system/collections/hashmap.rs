@@ -504,7 +504,7 @@ impl<'a, K: 'static + Object, V: 'static + Object, S> VacantEntry<'a, K, V, S> {
         &self.key
     }
 
-    pub fn insert(self, value: V) -> &'a mut V
+    pub fn insert(self, value: V)
     where
         K: PartialEq + Eq,
         S: BuildHasher,
@@ -532,12 +532,12 @@ impl<'a, K: 'static + Object, V: 'static + Object, S> VacantEntry<'a, K, V, S> {
             self.map.resize();
         }
 
-        self.map.table.as_mut().unwrap()[i as usize]
+        /*self.map.table.as_mut().unwrap()[i as usize]
             .as_mut()
             .unwrap()
             .value
             .as_mut()
-            .unwrap()
+            .unwrap()*/
     }
 }
 

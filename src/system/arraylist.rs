@@ -82,18 +82,22 @@ impl<T: Object> RawArray<T> {
 
 impl<T: Object> Object for RawArray<T> {
     fn trace_range(&self, from: usize, to: usize, visitor: &mut dyn crate::system::traits::Visitor) {
-        //println!("RAW ARRAY({}) trace: {}->{}", std::any::type_name::<T>(), from, to);
+        /*//println!("RAW ARRAY({}) trace: {}->{}", std::any::type_name::<T>(), from, to);
         for val in self.as_slice()[from..to].iter() {
             unsafe { val.assume_init_ref().trace(visitor); }
+        }*/
+
+        unsafe {
+            visitor.visit_conservative(self.data.as_ptr().add(from).cast(), to - from);
         }
     }
 }
 
 impl<T: Object + Allocation> Allocation for RawArray<T> {
     const VARSIZE: bool = true;
-    const NO_HEAP_PTRS: bool = true;
+    const NO_HEAP_PTRS: bool = false;
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
-    const VARSIZE_NO_HEAP_PTRS: bool = T::NO_HEAP_PTRS;
+    const VARSIZE_NO_HEAP_PTRS: bool = false;
     const SIZE: usize = size_of::<Self>();
     const VARSIZE_OFFSETOF_CAPACITY: usize = offset_of!(Self, cap);
     const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Self, len);
@@ -116,6 +120,22 @@ impl<T: Object + Allocation> ArrayList<T> {
     /// for arrays
     pub const fn max_elems() -> usize {
         u32::MAX as usize
+    }
+
+    pub fn array_offset() -> usize {
+        offset_of!(Self, array)
+    }
+
+    pub fn cap_offset() -> usize {
+        offset_of!(RawArray::<T>, cap)
+    }
+
+    pub fn len_offset() -> usize {
+        offset_of!(RawArray::<T>, len)
+    }
+
+    pub fn data_offset() -> usize {
+        offset_of!(RawArray::<T>, data)
     }
 
     pub fn with_capacity(thread: &mut Thread, capacity: usize) -> Self {
@@ -237,6 +257,10 @@ impl<T: Object + Allocation> ArrayList<T> {
         self.array.set_len(0);
         new_buf.set_len(len);
         self.array = new_buf;
+    }
+
+    pub fn write_barrier(&mut self, thread: &mut Thread) {
+        thread.write_barrier(self.array);
     }
 
     pub fn push(&mut self, thread: &mut Thread, val: T) {

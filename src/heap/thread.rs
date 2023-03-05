@@ -364,6 +364,7 @@ impl Thread {
         unsafe {
             for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
                 let obj = self.satb_mark_queue.buf.add(i).read();
+                assert!(heap.is_in(obj), "not in heap: {:p} (cm_in_progress?={})", obj, self.cm_in_progress);
                 // GC can do some progress in background and already mark object that was in SSB.
                 if !(*self.mark_ctx).is_marked(obj as _) || cfg!(feature = "gc-incremental-update")
                 {
