@@ -12,6 +12,7 @@ use crate::heap::safepoint::SafepointSynchronize;
 use crate::heap::sweeper::SweepGarbageClosure;
 use crate::heap::thread::Thread;
 use crate::heap::PausePhase;
+use crate::system::finalizer::finalize;
 use crate::system::object::HeapObjectHeader;
 use crate::system::traits::{Object, Visitor};
 use crate::system::weak_reference::WeakReference;
@@ -56,7 +57,7 @@ impl FullGC {
         }
 
         {
-            let phase = PausePhase::new("Clean up weak references");
+            let phase = PausePhase::new("Clean up weak references & Finalize");
             WeakReference::<dyn Object>::process(|pointer| {
                 let header = pointer.cast::<HeapObjectHeader>().sub(1);
 
@@ -67,9 +68,10 @@ impl FullGC {
                     null_mut()
                 }
             });
+            finalize();
             drop(phase);
         }
-
+        
 
         let phase = PausePhase::new("Sweep");
 
@@ -97,8 +99,6 @@ impl FullGC {
         drop(phase);
         log::debug!(target: "gc", "STW Mark-and-Sweep done in {} ms, {} live regions after sweep", start.elapsed().as_millis(), closure.live.load(std::sync::atomic::Ordering::Relaxed));
         SafepointSynchronize::end(threads);
-
-        
     }
 
     unsafe fn do_mark(&mut self, _threads: &[*mut Thread]) {

@@ -4,6 +4,7 @@ use std::{mem::size_of, ptr::null_mut, time::Instant};
 
 use crate::env::{get_total_memory, read_float_from_env};
 use crate::heap::heap::heap;
+use crate::sync::mutex::Mutex;
 use crate::system::object::HeapObjectHeader;
 use crate::{env::read_uint_from_env, formatted_size};
 
@@ -818,6 +819,7 @@ impl HeapRegion {
     pub fn is_regular(&self) -> bool {
         self.typ == RegionState::Regular
     }
+
 
     pub const MIN_REGION_SIZE: usize = 4 * 1024;
     pub const MIN_NUM_PAGES: usize = 10;

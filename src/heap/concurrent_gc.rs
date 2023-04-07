@@ -9,7 +9,7 @@ use parking_lot::lock_api::RawMutex;
 use crate::{
     heap::{sweeper::SweepGarbageClosure, ConcurrentPhase, PausePhase},
     sync::suspendible_thread_set::SuspendibleThreadSetJoiner,
-    system::{object::HeapObjectHeader, traits::Object, weak_reference::WeakReference},
+    system::{object::HeapObjectHeader, traits::Object, weak_reference::WeakReference, finalizer::finalize},
 };
 
 use super::{
@@ -95,7 +95,7 @@ impl ConcurrentGC {
 
             // Phase 2: Sweep
             {
-                let phase = PausePhase::new("Clean up weak references");
+                let phase = PausePhase::new("Clean up weak references & Finalize");
                 WeakReference::<dyn Object>::process(|pointer| {
                     let header = pointer.cast::<HeapObjectHeader>().sub(1);
 
@@ -105,6 +105,7 @@ impl ConcurrentGC {
                         null_mut()
                     }
                 });
+                finalize();
                 drop(phase);
 
                 let phase = PausePhase::new("Prepare unswept regions");

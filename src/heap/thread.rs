@@ -10,7 +10,7 @@ use std::{
     thread::{JoinHandle, ThreadId},
 };
 
-use crate::heap::tlab::ThreadLocalAllocBuffer;
+use crate::{heap::tlab::ThreadLocalAllocBuffer, system::finalizer::register_for_finalization};
 use crate::{
     formatted_size,
     heap::{align_down, mark::MarkTask, stack::approximate_stack_pointer},
@@ -147,8 +147,17 @@ impl Thread {
             {
                 // Need to maintain black-mutator invariant with SATB
                 (*self.mark_bitmap).set_bit(obj as _);
+            }   
+
+            let handle = Handle::from_raw(obj.add(1).cast());
+
+            if T::FINALIZE {
+                register_for_finalization(handle);
             }
-            Handle::from_raw(obj.add(1).cast())
+
+            handle
+
+            
         }
     }
 
@@ -184,7 +193,14 @@ impl Thread {
                 // Need to maintain black-mutator invariant with SATB
                 (*self.mark_bitmap).set_bit(obj as _);
             }
-            Handle::from_raw(obj.add(1).cast())
+            
+            let handle = Handle::from_raw(obj.add(1).cast());
+
+            if T::FINALIZE {
+                register_for_finalization(handle);
+            }
+
+            handle
         }
     }
 
