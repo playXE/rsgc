@@ -128,3 +128,8 @@ cfg_if::cfg_if! {
         compile_error!("Multiple GC modes selected, enable only one of through features: gc-satb, gc-incremental-update, gc-passive");
     }
 }
+
+pub fn new_i32(thread: &mut prelude::Thread, x: i32) -> prelude::Handle<i32> {
+    let handle = thread.allocate(x);
+    handle
+}
