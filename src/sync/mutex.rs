@@ -49,6 +49,10 @@ const LOCKED_BIT: u8 = 0b01;
 const PARKED_BIT: u8 = 0b10;
 
 impl RawMutex {
+    pub const INIT: RawMutex = RawMutex {
+        state: AtomicU8::new(0),
+    };
+
     pub const fn new() -> Self {
         Self {
             state: AtomicU8::new(0),

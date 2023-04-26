@@ -617,6 +617,9 @@ impl Heap {
             return null_mut();
         }
         let index = self.region_index(addr);
+        if index >= self.num_regions() {
+            return null_mut();
+        }
         let region = self.get_region(index);
 
         unsafe {

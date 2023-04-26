@@ -497,9 +497,12 @@ impl Default for HeapArguments {
             tlab_waste_increment: 4,
             tlab_waste_target_percent: 1,
             parallel_region_stride: 1024,
-            parallel_gc_threads: std::thread::available_parallelism()
-                .map(|x| x.get())
-                .unwrap_or(2),
+            parallel_gc_threads: if num_cpus::get_physical() / 4 == 0 {
+                1
+            } else {
+                num_cpus::get_physical() / 4
+            },
+
             max_satb_buffer_flushes: 5,
             max_satb_buffer_size: 1024,
             full_gc_threshold: 3,
