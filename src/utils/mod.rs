@@ -8,6 +8,8 @@ pub mod sloppy_memset;
 pub mod machine_context;
 pub mod static_data;
 pub mod bitvector;
+pub mod bitfield;
+pub mod env;
 
 pub const fn nth_bit(n: usize) -> usize {
     if n >= size_of::<usize>() * 8 {

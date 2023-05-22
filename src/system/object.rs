@@ -13,7 +13,7 @@ use std::{
 use atomic::Ordering;
 
 use crate::{
-    bitfield::BitField,
+    utils::bitfield::BitField,
     heap::{
         align_usize, atomic_cmpxchg_weak, atomic_load, atomic_store, free_list::Entry,
         thread::Thread,
@@ -338,7 +338,7 @@ impl HeapObjectHeader {
 
         unsafe { self.heap_size_from_vtable(tags) }
     }
-    #[inline]
+    #[inline(always)]
     pub fn set_vtable(&mut self, vt: usize) {
         self.word = VtableTag::update(vt as _, self.word);
     }

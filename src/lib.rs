@@ -30,8 +30,6 @@
 
 use std::{cell::UnsafeCell, sync::atomic::AtomicPtr};
 
-pub mod bitfield;
-pub mod env;
 pub mod heap;
 pub mod sync;
 pub mod system;

@@ -2,11 +2,11 @@ use core::fmt;
 use std::intrinsics::unlikely;
 use std::{mem::size_of, ptr::null_mut, time::Instant};
 
-use crate::env::{get_total_memory, read_float_from_env};
+use crate::utils::env::{get_total_memory, read_float_from_env};
 use crate::heap::heap::heap;
 use crate::sync::mutex::Mutex;
 use crate::system::object::HeapObjectHeader;
-use crate::{env::read_uint_from_env, formatted_size};
+use crate::{utils::env::read_uint_from_env, formatted_size};
 
 use super::marking_context::MarkingContext;
 use super::virtual_memory::{PlatformVirtualMemory, VirtualMemory, VirtualMemoryImpl};
