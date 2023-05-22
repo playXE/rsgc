@@ -206,6 +206,8 @@ pub struct HeapArguments {
     pub pacing_surcharge: f64,
     
     pub parallel_root_mark_tasks: bool,
+    /// Size of heap (bytes) per GC thread used in calculating the number of GC threads.
+    pub heap_size_per_gc_thread: usize,
 }
 
 impl HeapArguments {
@@ -403,6 +405,11 @@ impl HeapArguments {
             None => ()
         }
 
+        match read_uint_from_env("GC_HEAP_SIZE_PER_GC_THREAD") {
+            Some(x) => this.heap_size_per_gc_thread = x,
+            None => (),
+        }
+
         this.heuristics = match std::env::var("GC_HEURISTICS") {
             Ok(x) => match x.to_lowercase().as_str() {
                 "adaptive" => GCHeuristic::Adaptive,
@@ -517,6 +524,7 @@ impl Default for HeapArguments {
             pacing_idle_slack: 2,
             pacing_max_delay: 10,
             pacing_surcharge: 1.1,
+            heap_size_per_gc_thread: 64 * 1024 * 1024,
         }
     }
 }
@@ -588,6 +596,9 @@ pub struct HeapOptions {
     pub pacing_surcharge: f64,
 
     pub parallel_root_mark_tasks: bool,
+
+    /// Size of heap (bytes) per GC thread used in calculating the number of GC threads.
+    pub heap_size_per_gc_thread: usize,
 }
 
 impl HeapOptions {

@@ -1,4 +1,4 @@
-/* 
+/
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::prelude::HeapOptions;
@@ -104,7 +104,24 @@ impl WorkerPolicy {
 
         let heap = super::heap::heap();
 
-        active_workers_by_heap_size = 2.max(heap.max_capacity() / )
+        active_workers_by_heap_size = 2.max(heap.max_capacity() / heap.options().heap_size_per_gc_thread);
+
+        let max_active_workers = active_workers_by_mt * active_workers_by_heap_size;
+
+        let mut new_active_workers = max_active_workers.min(total_workers);
+
+        if new_active_workers < prev_active_workers {
+            new_active_workers = min_workers.min((prev_active_workers + new_active_workers) / 2);
+        }
+
+        new_active_workers
+    }
+
+    /// If the user has specifically set the number of GC threads, use them.
+    /// If the user has turned off using a dynamic number of GC threads
+    /// or the users has requested a specific number, set the active
+    /// number of workers to all the workers.
+    pub fn calc_active_workers(total_workers: usize, active_workers: usize, application_workers: usize) -> usize {
+        todo!()
     }
 }
-*/
