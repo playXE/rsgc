@@ -112,7 +112,7 @@ pub mod prelude {
     pub use super::heap;
     pub use super::system;
     pub use heap::thread::*;
-    pub use heap::region::HeapArguments;
+    pub use heap::region::*;
     pub use system::{object::*, traits::*};
 }
 

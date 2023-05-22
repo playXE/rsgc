@@ -1,4 +1,3 @@
-/
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::prelude::HeapOptions;
