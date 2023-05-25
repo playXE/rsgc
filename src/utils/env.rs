@@ -51,7 +51,7 @@ cfg_if::cfg_if! {
     if #[cfg(target_pointer_width="32")]
     {
         cfg_if::cfg_if! { if #[cfg(linux)] {
-                const ADRESSABLE_SIZE: usize = 4 * 1024 * 1024 * 1024;
+                const ADRESSABLE_SIZE: usize = 3 * 1024 * 1024 * 1024;
             } else if #[cfg(windows)] {
                 const ADRESSABLE_SIZE: usize = 2 * 1024 * 1024 * 1024;
             } else {
@@ -66,7 +66,7 @@ cfg_if::cfg_if! {
 fn get_total_memory_linux(_filename: &str) -> usize {
     #[cfg(all(target_pointer_width="32", unix))]
     {
-        return 2 * 1024 * 1024 * 1024
+        return 3 * 1024 * 1024 * 1024
     }
     #[cfg(all(target_os = "linux", not(target_pointer_width="32")))]
     unsafe {
