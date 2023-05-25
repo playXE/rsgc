@@ -1,4 +1,3 @@
-
 fn read_float_and_factor_from_env(var: &str) -> Option<(f64, usize)> {
     let value = std::env::var(var);
 
@@ -48,16 +47,16 @@ pub fn read_float_from_env(var: &str) -> Option<f64> {
     read_float_and_factor_from_env(var).map(|x| x.0)
 }
 
-
 cfg_if::cfg_if! {
     if #[cfg(target_pointer_width="32")]
     {
-        if #[cfg(linux)] {
-            const ADRESSABLE_SIZE: usize = 4 * 1024 * 1024 * 1024;
-        } else if #[cfg(windows)] {
-            const ADRESSABLE_SIZE: usize = 2 * 1024 * 1024 * 1024;
-        } else {
-            const ADRESSABLE_SIZE: usize = 3 * 1024 * 1024 * 1024;
+        cfg_if::cfg_if! { if #[cfg(linux)] {
+                const ADRESSABLE_SIZE: usize = 4 * 1024 * 1024 * 1024;
+            } else if #[cfg(windows)] {
+                const ADRESSABLE_SIZE: usize = 2 * 1024 * 1024 * 1024;
+            } else {
+                const ADRESSABLE_SIZE: usize = 3 * 1024 * 1024 * 1024;
+            }
         }
     } else {
         const ADRESSABLE_SIZE: usize = 2usize.pow(63);
@@ -65,12 +64,15 @@ cfg_if::cfg_if! {
 }
 
 fn get_total_memory_linux(_filename: &str) -> usize {
-    
-    #[cfg(target_os="linux")]
+    #[cfg(all(target_pointer_width="32", unix))]
+    {
+        return 2 * 1024 * 1024 * 1024
+    }
+    #[cfg(all(target_os = "linux", not(target_pointer_width="32")))]
     unsafe {
-        libc::sysconf(libc::_SC_PHYS_PAGES) as usize * libc::sysconf(libc::_SC_PAGESIZE) as usize 
-    } 
-    #[cfg(not(target_os="linux"))]
+        libc::sysconf(libc::_SC_PHYS_PAGES) as usize * libc::sysconf(libc::_SC_PAGESIZE) as usize
+    }
+    #[cfg(not(target_os = "linux"))]
     {
         ADRESSABLE_SIZE
     }
@@ -87,10 +89,20 @@ fn get_darwin_sysctl(name: &str) -> u64 {
         let cstr = CString::new(name).unwrap();
         let mut len = size_of::<u64>();
         let mut buf = [0u8; 16];
-        let result = libc::sysctlbyname(cstr.as_ptr(), &mut buf[0] as *mut u8 as _, &mut len, null_mut(), 0);
+        let result = libc::sysctlbyname(
+            cstr.as_ptr(),
+            &mut buf[0] as *mut u8 as _,
+            &mut len,
+            null_mut(),
+            0,
+        );
         if result == 0 && len == size_of::<u64>() {
             let mut value = 0i64;
-            std::ptr::copy_nonoverlapping(&buf[0], &mut value as *mut i64 as *mut u8, size_of::<u64>());
+            std::ptr::copy_nonoverlapping(
+                &buf[0],
+                &mut value as *mut i64 as *mut u8,
+                size_of::<u64>(),
+            );
             value as _
         } else {
             ADRESSABLE_SIZE as _

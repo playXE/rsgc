@@ -63,6 +63,12 @@ pub fn shift_for_power_of_two<
     num_shifts
 }
 
+pub fn is_aligned_usize(x: usize, alignment: usize, offset: usize) -> bool {
+    assert!(is_power_of_two(alignment));
+    assert!(offset < alignment);
+    (x & (alignment - 1)) == offset
+}
+
 pub fn is_aligned<
     T: BitOr<T, Output = T>
         + BitAnd<T, Output = T>
@@ -106,8 +112,15 @@ pub fn round_down<
     alignment: isize,
 ) -> T {
     assert!(is_power_of_two(alignment));
+   
     T::from_isize(x.to_isize().unwrap() & -alignment).unwrap()
 }
+
+pub fn round_down_usize(x: usize, alignment: usize) -> usize {
+    assert!(is_power_of_two(alignment));
+    x & !(alignment.wrapping_sub(1))
+}
+
 
 
 pub fn round_down_unchecked<
@@ -190,7 +203,7 @@ pub fn round_up_to_power_of_two(x: usize) -> usize {
 }
 
 pub fn round_up_usize(x: usize, alignment: usize, offset: usize) -> usize {
-    round_up_unchecked(x, alignment, offset)
+    round_down_usize(x + alignment - 1 + offset, alignment).wrapping_sub(offset)
 }
 
 pub const fn log2i_graceful(value: usize) -> isize {

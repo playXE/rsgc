@@ -386,7 +386,7 @@ where
             let i = ((tab.len() as u64 - 1) & hash) as usize;
             let mut p = tab[i];
             while let Some(n) = p {
-                if n.hash == hash && n.key.borrow() == &key {
+                if n.hash == hash && &n.key == &key {
                     e = Some(n);
                     break;
                 }

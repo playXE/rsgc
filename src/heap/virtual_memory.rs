@@ -198,7 +198,7 @@ pub mod posix {
     use crate::{
         heap::memory_region::MemoryRegion,
         heap::virtual_memory::VirtualMemory,
-        utils::{is_aligned, is_power_of_two, round_down, round_up}, formatted_size,
+        utils::{is_aligned, is_power_of_two, round_down, round_up, round_up_usize, is_aligned_usize, round_down_usize}, formatted_size,
     };
 
     use super::{Protection, VirtualMemoryImpl};
@@ -242,7 +242,7 @@ pub mod posix {
         let address = map(hint, allocated_size as _, prot, map_flags, -1, 0);
 
         let base = address as usize;
-        let aligned_base = round_up(base, alignment as _, 0);
+        let aligned_base = round_up_usize(base, alignment as _, 0);
 
         unmap(base, aligned_base);
         unmap(aligned_base + size as usize, base + allocated_size as usize);
@@ -364,12 +364,12 @@ pub mod posix {
         }
 
         fn decommit(address: *mut u8, size: usize) {
-            assert!(is_aligned(
+            assert!(is_aligned_usize(
                 address as usize,
                 VirtualMemory::<Self>::page_size(),
                 0
             ));
-            assert!(is_aligned(size, VirtualMemory::<Self>::page_size(), 0));
+            assert!(is_aligned_usize(size, VirtualMemory::<Self>::page_size(), 0));
 
             let result = unsafe {
                 libc::mmap(
@@ -415,7 +415,7 @@ pub mod posix {
         fn protect(address: *mut u8, size: usize, mode: super::Protection) {
             let start_address = address as usize;
             let end_address = start_address + size;
-            let page_address = round_down(start_address, VirtualMemory::<Self>::page_size() as _);
+            let page_address = round_down_usize(start_address, VirtualMemory::<Self>::page_size() as _);
 
             let prot = match mode {
                 Protection::NoAccess => libc::PROT_NONE,

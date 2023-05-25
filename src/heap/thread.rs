@@ -488,7 +488,7 @@ impl Thread {
                 self.platform_registers = registers_from_ucontext(&mut ctx);
                 self.enter_safepoint(approximate_stack_pointer() as _);
                 self.platform_registers = null_mut();
-                drop(ctx);
+                let _ = ctx;
             }
         }
     }
@@ -506,7 +506,7 @@ impl Thread {
                 getcontext(&mut ctx as *mut _);
 
                 self.platform_registers = registers_from_ucontext(&mut ctx);
-                drop(ctx);
+                let _ = ctx;
             }
         }
     }
@@ -594,7 +594,7 @@ impl Drop for UnsafeScope {
 ///
 /// Note that `cb` MUST not invoke any GC code or access GC objects otherwise UB will happen.
 pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R {
-    let mut thread = Thread::current();
+    let thread = Thread::current();
     unsafe {
         extern "C" {
             #[allow(improper_ctypes)]

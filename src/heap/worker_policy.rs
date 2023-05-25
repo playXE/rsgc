@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_variables, unused_assignments)]
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use crate::prelude::HeapOptions;

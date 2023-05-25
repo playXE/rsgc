@@ -30,6 +30,8 @@
 //! unsafe { sloppy_memset_pat16(some_hist_freqs.counts.as_mut_ptr()) }
 //! ```
 
+use crate::utils::is_aligned_usize;
+
 use super::is_aligned;
 use core::{mem::*, simd::*};
 
@@ -69,10 +71,14 @@ pub unsafe fn sloppy_memset_pat16(ptr: *mut u16, value: u16, count: usize) {
     // basically is the is reason these functions exist)
     #[cfg(all(
         target_feature = "sse2",
-        any(target_arch = "x86_64", target_arch = "x86"),
+        all(target_arch = "x86_64", not(target_arch="x86")),
     ))]
     let splat: u8x16 = transmute(core::arch::x86_64::_mm_set1_epi16(value as i16));
-
+    #[cfg(all(
+        target_feature = "sse2",
+        all(target_arch = "x86", not(target_arch="x86_64")),
+    ))]
+    let splat: u8x16 = transmute(core::arch::x86::_mm_set1_epi16(value as i16));
     #[cfg(not(all(
         target_feature = "sse2",
         any(target_arch = "x86_64", target_arch = "x86"),
@@ -128,7 +134,7 @@ unsafe fn simd_sloppy_memset<T>(ptr: *mut T, splat: u8x16, count: usize) {
             && size_of::<T>() <= 16
             && size_of::<T>().is_power_of_two()
     );
-    debug_assert!(is_aligned(ptr as usize, align_of::<T>(), 0));
+    debug_assert!(is_aligned_usize(ptr as usize, align_of::<T>(), 0));
 
     // Write the unaligned head.
     ptr.cast::<u8x16>().write_unaligned(splat);
@@ -148,7 +154,7 @@ unsafe fn simd_sloppy_memset<T>(ptr: *mut T, splat: u8x16, count: usize) {
     };
     // paranoia check
     debug_assert!(
-        is_aligned(p as usize, align_of::<u8x16>(), 0) && (p.cast::<u8>() > ptr.cast::<u8>())
+        is_aligned_usize(p as usize, align_of::<u8x16>(), 0) && (p.cast::<u8>() > ptr.cast::<u8>())
     );
     loop {
         // Miri does not believe it's possible to manually

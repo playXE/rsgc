@@ -138,6 +138,7 @@ impl Heap {
         )
         .unwrap();
 
+       
         unsafe {
             let uncommit_start = mem.address().add(initial_size);
             let uncommit_size = mem.size() - initial_size;

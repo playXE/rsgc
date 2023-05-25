@@ -1,14 +1,15 @@
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::distributions::{Distribution, Uniform};
 use rand::thread_rng;
+use std::mem::size_of;
 use std::ptr::null;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::system::object::HeapObjectHeader;
 use crate::sync::suspendible_thread_set::SuspendibleThreadSetLeaver;
+use crate::system::object::HeapObjectHeader;
 use crate::system::traits::Visitor;
 
 use super::heap::{heap, Heap};
@@ -633,9 +634,90 @@ if #[cfg(target_pointer_width="64")] {
             /// There is also a fallback version that uses plain fields, when we don't have enough space to steal the
             /// bits from the native pointer. It is useful to debug the optimized version.
             ///
-            pub struct MarkTask {
 
+            #[derive(Clone, Copy, PartialEq, PartialOrd, Debug, Hash, Eq, Ord)]
+            pub struct MarkTask {
+                obj: usize,
+                skip_live: bool,
+                weak: bool,
+                chunk: i32,
+                pow: i32
             }
+
+            impl MarkTask {
+                pub const CHUNK_BITS: u8 = 10;
+                pub const POW_BITS: u8 = 5;
+                pub const CHUNK_MAX: usize = nth_bit(Self::CHUNK_BITS as usize) - 1;
+                pub const POW_MAX: usize = nth_bit(Self::POW_BITS as usize) - 1;
+            
+                #[inline]
+                pub fn new(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool) -> Self {
+                    Self {
+                        obj: obj as usize, 
+                        skip_live,
+                        weak,
+                        chunk: 0,
+                        pow: 0
+                    }
+                }
+
+                #[inline]
+                pub fn new2(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool, chunk: usize, pow: usize) -> Self {
+                    Self {
+                        obj: obj as usize, 
+                        skip_live,
+                        weak,
+                        chunk: chunk as i32,
+                        pow: pow as i32
+                    }
+                }
+
+                #[inline]
+                pub fn obj(self) -> *mut HeapObjectHeader {
+                    self.obj as *mut HeapObjectHeader
+                }
+
+                #[inline]
+                pub fn chunk(self) -> usize {
+                    self.chunk as usize
+                }
+                
+                #[inline]
+                pub fn pow(self) -> usize {
+                    self.pow as usize
+                }
+
+                #[inline]
+                pub fn is_not_chunked(self) -> bool {
+                    self.chunk == 0
+                }
+
+                #[inline]
+                pub fn is_weak(self) -> bool {
+                    self.weak
+                }
+                
+                #[inline]
+                pub fn count_liveness(self) -> bool {
+                    !self.skip_live
+                }
+
+                #[inline]
+                pub fn max_addressable(self) -> usize {
+                    size_of::<usize>()
+                }
+
+                #[inline]
+                pub fn max_chunk(self) -> usize {
+                    Self::CHUNK_MAX
+                }
+                #[inline]
+                pub const fn chunk_size() -> usize {
+                    nth_bit(Self::CHUNK_BITS as usize)
+                }
+            }
+
+
         }
 }
 
