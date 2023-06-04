@@ -43,6 +43,22 @@ impl<T> Monitor<T> {
     pub fn notify_one(&self) -> bool {
         self.cv.notify_one()
     }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        self.mutex.get_mut()
+    }
+
+    pub unsafe fn unsafe_get(&self) -> &T {
+        self.mutex.unsafe_get()
+    }
+
+    pub fn mutex(&self) -> &Mutex<T> {
+        &self.mutex
+    }
+
+    
+
+
 }
 
 pub struct MonitorLocker<'a, T> {
