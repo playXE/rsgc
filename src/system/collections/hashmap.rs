@@ -243,8 +243,9 @@ where
             next: tab[i],
         });
 
+        thread.write_barrier(tab);
         tab[i] = Some(node);
-
+        
         self.mod_count += 1;
         self.size += 1;
         if self.size > self.threshold {

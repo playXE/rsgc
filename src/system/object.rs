@@ -457,6 +457,8 @@ pub struct Handle<T: Object + ?Sized> {
 unsafe impl<T: Send + Object + ?Sized> Send for Handle<T> {}
 unsafe impl<T: Sync + Object + ?Sized> Sync for Handle<T> {}
 
+
+
 impl<T: Object + ?Sized> Handle<T> {
     /// Get a raw pointer to the allocation. This is the same as `as_ptr`.
     #[inline]
