@@ -631,25 +631,7 @@ pub fn safepoint_scope<R>(cb: impl FnOnce() -> R) -> R {
 }
 
 static mut SINK: u8 = 0;
-/*
-thread_local! {
-    static THREAD: UnsafeCell<Thread> = UnsafeCell::new(
-        Thread {
-            biased_begin: 0,
-            id: std::thread::current().id(),
-            mark_ctx: null_mut(),
-            mark_bitmap: null_mut(),
-            tlab: ThreadLocalAllocBuffer::new(),
-            stack: StackBounds::current_thread_stack_bounds(),
-            safepoint: unsafe { &mut SINK },
-            last_sp: null_mut(),
-            max_tlab_size: 0,
-            gc_state: 0,
-            satb_mark_queue: LocalSSB::new(),
-            cm_in_progress: false,
-            platform_registers: null_mut()
-        });
-}*/
+
 
 #[thread_local]
 static mut THREAD: Thread = Thread {
@@ -738,7 +720,7 @@ pub(crate) fn threads() -> &'static Threads {
 
 pub struct OOM(pub usize);
 
-/// Spawns main GC thread and runs `callback` on it.
+/// Marks current thread as 'main' thread. Initializes GC with given arguments and calls `callback`.
 ///
 /// Note that this function does not terminate until all mutator threads are terminated and GC is stopped.
 pub fn main_thread<R>(
@@ -788,6 +770,7 @@ where
     });
     GCAwareJoinHandle { join }
 }
+
 
 pub struct GCAwareJoinHandle<R> {
     join: JoinHandle<R>,

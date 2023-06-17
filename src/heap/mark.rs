@@ -1,3 +1,8 @@
+//! Marking phase of the GC.
+//! 
+//! Implements simple marking algorithm that uses a work stealing queue to distribute marking work between worker threads.
+//! Marking tasks can be terminated if GC is cancelled which allows us to start STW GC as soon as possible.
+
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use rand::distributions::{Distribution, Uniform};
 use rand::thread_rng;

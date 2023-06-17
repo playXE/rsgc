@@ -1,3 +1,9 @@
+//! Sweep phase of the garbage collector.
+//! 
+//! This phase is responsible for freeing memory that is no longer in use. Regions are swept in parallel
+//! and the work is distributed between the worker threads. Sweep phase can be cancelled at any time if 
+//! mutator threads need more memory and sweep phase can't keep up with the rate of allocation.
+
 use std::{collections::HashSet, intrinsics::unlikely, ptr::null_mut, sync::atomic::AtomicUsize};
 
 use crossbeam_queue::SegQueue;

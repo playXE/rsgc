@@ -25,6 +25,10 @@ impl RootSet {
         self.roots.push(root);
     }
 
+    pub fn remove_root(&mut self, root: Arc<dyn Root>) {
+        self.roots.retain(|x| !Arc::ptr_eq(x, &root));
+    }
+
     pub fn add_roots(&mut self, roots: &[Arc<dyn Root>]) {
         self.roots.extend_from_slice(roots);
     }

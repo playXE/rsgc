@@ -355,9 +355,23 @@ impl Heap {
         self.regions[index]
     }
 
-    pub fn add_root(&mut self, root: impl Root + 'static) {
+    /// Add root to the root set. 
+    /// Returns a reference to the root, which can be used to remove it from the root set later.
+    pub fn add_root(&mut self, root: impl Root + 'static) -> Arc<dyn Root> {
         self.lock.lock();
-        self.root_set.add_root(Arc::new(root));
+        let root = Arc::new(root);
+        self.root_set.add_root(root.clone());
+        unsafe {
+            self.lock.unlock();
+        }
+
+        root
+    }
+
+    /// Remove a root from the root set.
+    pub fn remove_root(&mut self, root: Arc<dyn Root>) {
+        self.lock.lock();
+        self.root_set.remove_root(root);
         unsafe {
             self.lock.unlock();
         }
@@ -373,7 +387,7 @@ impl Heap {
         cb(heap().marking_context);
     }
 
-    pub fn process_cards(&mut self, clear: bool) {
+    pub(crate) fn process_cards(&mut self, clear: bool) {
         if clear {
             self.card_table
                 .clear_card_range(self.mem.start() as _, self.mem.end() as _);
@@ -423,11 +437,11 @@ impl Heap {
         mem
     }
 
-    pub fn workers(&self) -> &Pool {
+    pub(crate) fn workers(&self) -> &Pool {
         &self.scoped_pool
     }
 
-    pub fn marking_context(&self) -> &MarkingContext {
+    pub(crate) fn marking_context(&self) -> &MarkingContext {
         &self.marking_context
     }
 
@@ -598,7 +612,7 @@ impl Heap {
         self.marking_context.clear_bitmap_full();
     }
 
-    pub unsafe fn get_humongous_start(&self, mut r: *mut HeapRegion) -> *mut HeapRegion {
+    pub(crate) unsafe fn get_humongous_start(&self, mut r: *mut HeapRegion) -> *mut HeapRegion {
         let mut i = (*r).index();
 
         while !(*r).is_humongous_start() {
