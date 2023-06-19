@@ -9,7 +9,7 @@ edition = "2021"
 mimalloc = "0.1"
 
 [[bin]]
-name = "binarytrees"
+name = "binarytrees-rc"
 path = "binarytrees.rs"
 
 [profile.release]

@@ -1,5 +1,5 @@
 [package]
-name = "rust"
+name = "btrees"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,6 +9,6 @@ edition = "2021"
 rsgc = { path = "../../../", default-features = false, features = ["gc-satb"] } 
 env_logger = "0.10"
 [[bin]]
-name = "binarytrees"
+name = "binarytrees-single"
 path = "./binarytrees.rs"
 

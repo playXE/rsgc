@@ -1,5 +1,8 @@
 all: build run
 
+CMD = ''
+
+
 build:
 	cd rust && cargo build --release 
 	cd csharp && dotnet build -c Release
@@ -8,7 +11,7 @@ build:
 run:
 	@echo "Running latency benchmark"
 	@echo "RSGC (512MB heap)"
-	@cd rust && GC_MAX_HEAP_SIZE=512M cargo run --release --quiet
+	@cd rust && GC_MAX_HEAP_SIZE=512M GC_PARALLEL_ROOT_MARKS=0 cargo run --release --quiet
 	@echo "C# (default heap)"
 	@cd csharp && dotnet run -c Release
 	@echo "Java (512MB heap, Shenandoah)"
