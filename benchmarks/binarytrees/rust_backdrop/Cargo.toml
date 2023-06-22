@@ -1,5 +1,5 @@
 [package]
-name = "binarytrees"
+name = "binarytrees-backdrop"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,5 +10,5 @@ backdrop_arc = "0.1"
 parking_lot = "0.12"
 snmalloc-rs = "0.3"
 [[bin]]
-name = "binarytrees"
+name = "binarytrees-backdrop"
 path = "./binarytrees.rs"
