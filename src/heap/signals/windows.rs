@@ -1,3 +1,4 @@
+use winapi::um::errhandlingapi::SetUnhandledExceptionFilter;
 use winapi::um::minwinbase::EXCEPTION_ACCESS_VIOLATION;
 use winapi::um::winnt::LONG;
 use winapi::um::winnt::PEXCEPTION_POINTERS;
@@ -7,9 +8,13 @@ use winapi::vc::excpt::EXCEPTION_CONTINUE_SEARCH;
 use crate::heap::heap::heap;
 use crate::heap::safepoint;
 use crate::prelude::Thread;
-pub fn install_signal_handlers() {}
+pub fn install_signal_handlers() {
+    unsafe {
+        SetUnhandledExceptionFilter(Some(exception_handler));
+    }
+}
 
-pub unsafe extern "C" fn exception_handler(exception_info: PEXCEPTION_POINTERS) -> LONG {
+pub unsafe extern "system" fn exception_handler(exception_info: PEXCEPTION_POINTERS) -> LONG {
     if (*(*exception_info).ExceptionRecord).ExceptionFlags != 0 {
         return EXCEPTION_CONTINUE_SEARCH;
     }
