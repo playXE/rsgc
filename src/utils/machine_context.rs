@@ -17,9 +17,13 @@ cfg_if::cfg_if! {
                 &mut (*(*ucontext).uc_mcontext).__ss as *mut PlatformRegisters
             }
         }
-        
+
     } else if #[cfg(windows)] {
         pub type PlatformRegisters = winapi::um::winnt::CONTEXT;
+
+        pub fn registers_from_ucontext(ucontext: *mut winapi::um::winnt::CONTEXT) -> *mut PlatformRegisters {
+            ucontext
+        }
     } else {
         pub struct PlatformRegisters {
             pub machine_context: libc::mcontext_t
@@ -34,7 +38,7 @@ cfg_if::cfg_if! {
                         &mut (*ucontext).uc_mcontext as *mut libc::mcontext_t as *mut PlatformRegisters
                     }
                 }
-                
+
             }
         }
     }

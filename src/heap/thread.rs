@@ -595,7 +595,9 @@ impl Drop for UnsafeScope {
 /// Note that `cb` MUST not invoke any GC code or access GC objects otherwise UB will happen.
 pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R {
     let thread = Thread::current();
+    #[cfg(not(windows))]
     unsafe {
+        
         extern "C" {
             #[allow(improper_ctypes)]
             fn getcontext(ctx: *mut libc::ucontext_t) -> i32;
@@ -604,6 +606,35 @@ pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R 
 
         getcontext(&mut ucontext);
         thread.platform_registers = registers_from_ucontext(&mut ucontext);
+        let state = thread.state_save_and_set(if enter { GC_STATE_SAFE } else { 0 });
+
+        thread.set_last_sp(approximate_stack_pointer() as _);
+        let cb = AssertUnwindSafe(cb);
+        let result = match std::panic::catch_unwind(move || cb()) {
+            Ok(result) => result,
+            Err(err) => {
+                thread.gc_state_set(state, GC_STATE_SAFE);
+                thread.platform_registers = null_mut();
+                std::panic::resume_unwind(err);
+            }
+        };
+
+        thread.gc_state_set(state, if enter { GC_STATE_SAFE } else { 0 });
+        thread.platform_registers = null_mut();
+        result
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        let mut context = MaybeUninit::<winapi::um::winnt::CONTEXT>::zeroed().assume_init();
+
+        winapi::um::processthreadsapi::GetThreadContext(
+            winapi::um::processthreadsapi::GetCurrentThread(),
+            &mut context,
+        );
+
+        thread.platform_registers = &mut context;
+
         let state = thread.state_save_and_set(if enter { GC_STATE_SAFE } else { 0 });
 
         thread.set_last_sp(approximate_stack_pointer() as _);

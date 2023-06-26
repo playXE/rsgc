@@ -25,7 +25,7 @@ atomic = "0.5"
 error-code = "2.3"
 
 [dependencies.memoffset]
-version = "0.8"
+version = "0.9"
 features = ["unstable_const"]
 
 [target.'cfg(windows)'.dependencies]
@@ -37,6 +37,7 @@ winapi = { version = "0.3", features = [
     "errhandlingapi",
     "excpt",
     "minwindef",
+    
 ] }
 
 [features]

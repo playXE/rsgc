@@ -7,3 +7,6 @@ pub mod windows;
 
 #[cfg(unix)]
 pub use unix::install_signal_handlers;
+
+#[cfg(windows)]
+pub use windows::install_signal_handlers;
