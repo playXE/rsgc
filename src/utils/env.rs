@@ -78,6 +78,21 @@ fn get_total_memory_linux(_filename: &str) -> usize {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn get_total_memory_windows() -> usize {
+    use winapi::um::sysinfoapi::GetPhysicallyInstalledSystemMemory;
+
+    unsafe {
+        let mut kilobytes = 0;
+        let status = GetPhysicallyInstalledSystemMemory(&mut kilobytes);
+        if status == 0 {
+            ADRESSABLE_SIZE
+        } else {
+            kilobytes as usize * 1024
+        }
+    }
+}
+
 #[cfg(target_vendor = "apple")]
 fn get_darwin_sysctl(name: &str) -> u64 {
     use std::ffi::CString;
@@ -129,7 +144,7 @@ pub fn get_total_memory() -> usize {
             get_total_memory_linux("/proc/meminfo")
         } else if #[cfg(target_os="windows")]
         {
-            ADRESSABLE_SIZE
+            get_total_memory_windows()
         } else if #[cfg(any(target_os="macos", target_os="ios", target_os="tvos", target_os="watchos"))]
         {
             get_darwin_sysctl("hw.memsize") as _
