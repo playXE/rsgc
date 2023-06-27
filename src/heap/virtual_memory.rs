@@ -62,11 +62,11 @@ impl<VM: VirtualMemoryImpl> VirtualMemory<VM> {
     }
 
     pub fn address(&self) -> *mut u8 {
-        self.reserved.pointer()
+        self.region.pointer()
     }
 
     pub fn size(&self) -> usize {
-        self.reserved.size()
+        self.region.size()
     }
 
     pub fn alias_offset(&self) -> usize {
