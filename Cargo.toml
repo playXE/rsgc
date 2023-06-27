@@ -26,7 +26,6 @@ error-code = "2.3"
 
 [dependencies.memoffset]
 version = "0.9"
-features = ["unstable_const"]
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [
@@ -46,3 +45,12 @@ gc-satb = []
 gc-incremental-update = []
 gc-passive = []
 default = ["gc-satb"]
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+
+[lib]
+name = "rsgc"
+crate-type = ["cdylib", "rlib", "staticlib"]
