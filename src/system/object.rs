@@ -449,6 +449,7 @@ impl HeapObjectHeader {
 ///
 /// ## Safety
 /// A `Handle` can be safely transmuted back and forth from its corresponding pointer.
+#[repr(transparent)]
 pub struct Handle<T: Object + ?Sized> {
     pub(crate) ptr: NonNull<u8>,
     marker: PhantomData<NonNull<T>>,
