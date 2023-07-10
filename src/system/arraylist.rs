@@ -890,3 +890,23 @@ impl<T: fmt::Debug + Object + Allocation> fmt::Debug for ArrayList<T> {
         f.debug_list().entries(self.iter()).finish()
     }
 }
+
+impl<T: Object + Allocation> ArrayList<MaybeUninit<T>> {
+    pub unsafe fn assume_init(self) -> ArrayList<T> {
+        ArrayList {
+            array: std::mem::transmute(self.array),
+        }
+    }
+
+    /// Creates new array list with uninitialized elements.
+    /// 
+    /// # Safety
+    /// 
+    /// MUST initialize all elements before using. GC scans arraylist conservatively
+    /// so if GC scans arraylist while its uninitialized nothing bad will happen.
+    pub unsafe fn with_uninit(thread: &mut Thread, n: usize) -> Handle<ArrayList<MaybeUninit<T>>> {
+        let mut array = ArrayList::<T>::with_capacity(thread, n);
+        array.set_len(n);
+        std::mem::transmute(array)
+    }
+}
