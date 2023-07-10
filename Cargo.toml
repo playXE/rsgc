@@ -7,7 +7,7 @@ description = "Concurrent GC library for Rust"
 license = "BSD-2-Clause"
 readme = "README.md"
 repository = "https://github.com/playxe/rsgc"
-keywords = ["gc", "garbage collector", "concurrent"]
+keywords = ["gc", "concurrent"]
 
 
 [dependencies]
