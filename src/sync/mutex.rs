@@ -60,7 +60,7 @@ impl RawMutex {
     }
 
     #[inline]
-    fn try_lock(&self) -> bool {
+    pub fn try_lock(&self) -> bool {
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
             if state & LOCKED_BIT != 0 {
