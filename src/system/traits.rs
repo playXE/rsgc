@@ -10,7 +10,7 @@ use crate::system::object::*;
 /// See the documentation of the `trace` method for more info.
 /// Essentially, this object must faithfully trace anything that
 /// could contain garbage collected pointers or other `Object` items.
-pub trait Object: 'static {
+pub unsafe trait Object: 'static {
 
     /// Trace each field in this type.
     ///
@@ -70,9 +70,17 @@ pub trait Object: 'static {
 /// Visits garbage collected objects
 pub trait Visitor {
     /// Visit a pointer to a garbage collected object.
-    fn visit(&mut self, object: *const u8);
+    /// 
+    /// # SAFETY
+    /// 
+    /// `object` must be a valid heap object
+    unsafe fn visit(&mut self, object: *const u8);
     /// Visit range of pointers to garbage collected objects conservatively.
-    fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize);
+    /// 
+    /// # SAFETY
+    /// 
+    /// `ptrs` must be a valid pointer to potential heap objects.
+    unsafe fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize);
 
     /// Returns number of visited objects.
     fn visit_count(&self) -> usize;
@@ -84,14 +92,18 @@ pub trait WeakProcessor {
     /// 
     /// Returns new pointer to the object. If object is dead then null pointer is returned.
     /// Otherwise returned pointer must be equal to the original pointer.
-    fn process(&mut self, object: *const u8) -> *const u8;
+    /// 
+    /// # SAFE
+    /// 
+    /// `object` must be a valid heap object.
+    unsafe fn process(&mut self, object: *const u8) -> *const u8;
 }
 
 macro_rules! impl_simple {
     ($($t: ty)*) => {
         $(
-            impl Object for $t {}
-            impl $crate::system::object::Allocation for $t {
+            unsafe impl Object for $t {}
+            unsafe impl $crate::system::object::Allocation for $t {
                 const NO_HEAP_PTRS: bool = true;
             }
         )*
@@ -109,51 +121,51 @@ impl_simple!(
     std::net::TcpListener
 );
 
-impl Object for fn() {}
+unsafe impl Object for fn() {}
 
-impl<R: 'static> Object for fn() -> R {}
-impl<A1: 'static, R: 'static> Object for fn(A1) -> R {}
-impl<A1: 'static, A2: 'static, R: 'static> Object for fn(A1, A2) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, R: 'static> Object for fn(A1, A2, A3) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, R: 'static> Object for fn(A1, A2, A3, A4) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7, A8) -> R {}
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, A9: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R {}
-impl<R: 'static> Allocation for fn() -> R {
+unsafe impl<R: 'static> Object for fn() -> R {}
+unsafe impl<A1: 'static, R: 'static> Object for fn(A1) -> R {}
+unsafe impl<A1: 'static, A2: 'static, R: 'static> Object for fn(A1, A2) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, R: 'static> Object for fn(A1, A2, A3) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, R: 'static> Object for fn(A1, A2, A3, A4) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7, A8) -> R {}
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, A9: 'static, R: 'static> Object for fn(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R {}
+unsafe impl<R: 'static> Allocation for fn() -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, R: 'static> Allocation for fn(A1) -> R {
+unsafe impl<A1: 'static, R: 'static> Allocation for fn(A1) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, R: 'static> Allocation for fn(A1, A2) -> R {
+unsafe impl<A1: 'static, A2: 'static, R: 'static> Allocation for fn(A1, A2) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, R: 'static> Allocation for fn(A1, A2, A3) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, R: 'static> Allocation for fn(A1, A2, A3) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7, A8) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7, A8) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
-impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, A9: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R {
+unsafe impl<A1: 'static, A2: 'static, A3: 'static, A4: 'static, A5: 'static, A6: 'static, A7: 'static, A8: 'static, A9: 'static, R: 'static> Allocation for fn(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R {
     const NO_HEAP_PTRS: bool = true;
 }
 
 
-impl<T: Object> Object for Option<T> {
+unsafe impl<T: Object> Object for Option<T> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         if let Some(value) = self {
             value.trace(visitor);
@@ -167,7 +179,7 @@ impl<T: Object> Object for Option<T> {
     }
 }
 
-impl<T: Object + Allocation> Allocation for Option<T> {
+unsafe impl<T: Object + Allocation> Allocation for Option<T> {
     const DESTRUCTIBLE: bool = T::DESTRUCTIBLE;
     const FINALIZE: bool = T::FINALIZE;
     const NO_HEAP_PTRS: bool = T::NO_HEAP_PTRS;

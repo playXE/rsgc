@@ -24,7 +24,7 @@ impl Object for TreeNode {
     }
 }
 
-impl Allocation for TreeNode {
+unsafe impl Allocation for TreeNode {
     const FINALIZE: bool = false;
     const DESTRUCTIBLE: bool = false;
 }

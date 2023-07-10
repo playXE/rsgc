@@ -83,9 +83,13 @@ pub struct VT<T> {
 
 
 /// Tells GC how to allocate objet on the heap. In the case of non-variable sized object you can simply 
-/// do `impl Allocation for MyObject {}` and it will work. For variable sized objects you need to specify
+/// do `unsafe impl Allocation for MyObject {}` and it will work. For variable sized objects you need to specify
 /// additional information. See constants of this trait for more detail.
-pub trait Allocation: Object + Sized {
+/// 
+/// # SAFETY
+/// 
+/// Sizes of object must be correct.
+pub unsafe trait Allocation: Object + Sized {
     /// Does this object need to be finalized?
     /// 
     /// NOTE: Not used right now, reserved for future use.
@@ -590,8 +594,8 @@ impl<T: Object + ?Sized> fmt::Pointer for Handle<T> {
     }
 }
 
-impl<T: Object> Object for MaybeUninit<T> {}
-impl<T: Allocation + Object> Allocation for MaybeUninit<T> {
+unsafe impl<T: Object> Object for MaybeUninit<T> {}
+unsafe impl<T: Allocation + Object> Allocation for MaybeUninit<T> {
     const FINALIZE: bool = T::FINALIZE;
     const DESTRUCTIBLE: bool = T::DESTRUCTIBLE;
     const SIZE: usize = T::SIZE;
@@ -602,7 +606,7 @@ impl<T: Allocation + Object> Allocation for MaybeUninit<T> {
     const VARSIZE_OFFSETOF_VARPART: usize = T::VARSIZE_OFFSETOF_VARPART;
 }
 
-impl<T: Object + ?Sized> Allocation for Handle<T> {
+unsafe impl<T: Object + ?Sized> Allocation for Handle<T> {
     const NO_HEAP_PTRS: bool = false;
 }
 
@@ -669,28 +673,28 @@ impl<T: Object + Ord> Ord for Handle<T> {
     }
 }
 
-impl Object for () {}
-impl Allocation for () {}
+unsafe impl Object for () {}
+unsafe impl Allocation for () {}
 
-impl<A: Object, B: Object> Object for (A, B) {
+unsafe impl<A: Object, B: Object> Object for (A, B) {
     fn trace(&self, visitor: &mut dyn Visitor) {
         self.0.trace(visitor);
         self.1.trace(visitor);
     }
 }
-impl<A: Object + Allocation, B: Object + Allocation> Allocation for (A, B) {
+unsafe impl<A: Object + Allocation, B: Object + Allocation> Allocation for (A, B) {
     const SIZE: usize = A::SIZE + B::SIZE;
     const NO_HEAP_PTRS: bool = A::NO_HEAP_PTRS && B::NO_HEAP_PTRS;
 }
 
-impl<A: Object, B: Object, C: Object> Object for (A, B, C) {
+unsafe impl<A: Object, B: Object, C: Object> Object for (A, B, C) {
     fn trace(&self, visitor: &mut dyn Visitor) {
         self.0.trace(visitor);
         self.1.trace(visitor);
         self.2.trace(visitor);
     }
 }
-impl<A: Object + Allocation, B: Object + Allocation, C: Object + Allocation> Allocation for (A, B, C) {
+unsafe impl<A: Object + Allocation, B: Object + Allocation, C: Object + Allocation> Allocation for (A, B, C) {
     const SIZE: usize = A::SIZE + B::SIZE + C::SIZE;
     const NO_HEAP_PTRS: bool = A::NO_HEAP_PTRS && B::NO_HEAP_PTRS && C::NO_HEAP_PTRS;
 }

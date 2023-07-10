@@ -86,7 +86,7 @@ impl<K: Object + PartialEq, V: Object + PartialEq> PartialEq for Node<K, V> {
     }
 }
 
-impl<K: Object, V: Object> Object for Node<K, V> {
+unsafe impl<K: Object, V: Object> Object for Node<K, V> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         self.key.trace(visitor);
         self.value.trace(visitor);
@@ -95,7 +95,7 @@ impl<K: Object, V: Object> Object for Node<K, V> {
     }
 }
 
-impl<K: Object, V: Object> Allocation for Node<K, V> {}
+unsafe impl<K: Object, V: Object> Allocation for Node<K, V> {}
 
 pub enum DefaultHashBuilder {}
 
@@ -698,13 +698,15 @@ where
     state.finish()
 }
 
-impl<K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, S>> Object for LinkedHashMap<K, V, S, E> {
+unsafe impl<K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, S>> Object
+    for LinkedHashMap<K, V, S, E>
+{
     fn trace(&self, visitor: &mut dyn Visitor) {
         self.table.trace(visitor);
     }
 }
 
-impl<K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, S>> Allocation
+unsafe impl<K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, S>> Allocation
     for LinkedHashMap<K, V, S, E>
 {
 }
@@ -715,7 +717,9 @@ pub struct Iter<'a, K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, 
     head: Option<&'a Handle<Node<K, V>>>,
 }
 
-impl<'a, K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, S>> Iterator for Iter<'a, K, V, S, E> {
+impl<'a, K: Object, V: Object, S: 'static, E: LinkedHashMapExt<K, V, S>> Iterator
+    for Iter<'a, K, V, S, E>
+{
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {

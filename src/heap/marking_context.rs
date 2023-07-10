@@ -77,29 +77,25 @@ impl MarkingContext {
 }
 
 impl Visitor for MarkingContext {
-    fn visit(&mut self, object: *const u8) {
-        unsafe {
-            let obj = (object as *const HeapObjectHeader).sub(1);
-            if self.mark(obj) {
-                self.visit_count.fetch_add(1, atomic::Ordering::Relaxed);
-                self.mark_queues()
-                    .injector()
-                    .push(MarkTask::new(obj as _, false, false));
-            }
+    unsafe fn visit(&mut self, object: *const u8) {
+        let obj = (object as *const HeapObjectHeader).sub(1);
+        if self.mark(obj) {
+            self.visit_count.fetch_add(1, atomic::Ordering::Relaxed);
+            self.mark_queues()
+                .injector()
+                .push(MarkTask::new(obj as _, false, false));
         }
     }
 
-    fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize) {
+    unsafe fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize) {
         let heap = heap();
 
-        unsafe {
-            for i in 0..len {
-                let ptr = *ptrs.add(i);
-                if heap.is_in(ptr as _) {
-                    let start = heap.object_start(ptr as _);
-                    if !start.is_null() {
-                        self.visit(start.add(1).cast());
-                    }
+        for i in 0..len {
+            let ptr = *ptrs.add(i);
+            if heap.is_in(ptr as _) {
+                let start = heap.object_start(ptr as _);
+                if !start.is_null() {
+                    self.visit(start.add(1).cast());
                 }
             }
         }

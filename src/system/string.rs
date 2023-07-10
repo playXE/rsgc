@@ -42,8 +42,8 @@ impl Str {
     }
 }
 
-impl Object for Str {}
-impl Allocation for Str {
+unsafe impl Object for Str {}
+unsafe impl Allocation for Str {
     const NO_HEAP_PTRS: bool = true;
     const VARSIZE: bool = true;
     const VARSIZE_NO_HEAP_PTRS: bool = true;
@@ -130,13 +130,13 @@ pub struct String {
     vec: ArrayList<u8>,
 }
 
-impl Object for String {
+unsafe impl Object for String {
     fn trace(&self, visitor: &mut dyn crate::prelude::Visitor) {
         self.vec.trace(visitor)
     }
 }
 
-impl Allocation for String {}
+unsafe impl Allocation for String {}
 
 impl String {
     pub fn new(thread: &mut Thread) -> Self {

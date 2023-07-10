@@ -114,8 +114,8 @@ impl<T: ?Sized + Object> WeakReference<T> {
     }
 }
 
-impl<T: ?Sized + Object> Object for WeakReference<T> {}
-impl<T: ?Sized + Object> Allocation for WeakReference<T> {}
+unsafe impl<T: ?Sized + Object> Object for WeakReference<T> {}
+unsafe impl<T: ?Sized + Object> Allocation for WeakReference<T> {}
 
 pub struct WeakMapping<K: ?Sized + Object, V: ?Sized + Object> {
     key: *mut u8,

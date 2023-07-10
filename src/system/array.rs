@@ -1,12 +1,16 @@
 use memoffset::offset_of;
 
+use super::object::*;
 use super::traits::*;
 use crate::heap::{thread::*, AllocError};
-use super::object::*;
-use std::{mem::size_of, ops::{Deref, DerefMut}, hash::Hash};
+use std::{
+    hash::Hash,
+    mem::size_of,
+    ops::{Deref, DerefMut},
+};
 
 /// GC allocated immutable array.
-/// 
+///
 /// It derefs to `[T]` so you can use it just as a regular slice.
 #[repr(C)]
 pub struct Array<T: Object + Sized> {
@@ -17,13 +21,20 @@ pub struct Array<T: Object + Sized> {
 
 impl<T: 'static + Object + Sized> Array<T> {
     /// Create a new array with the given length. Invokes `init` to produce the element at each index.
-    pub fn new(th: &mut Thread, len: usize, mut init: impl FnMut(&mut Thread, usize) -> T) -> Handle<Self> where T: Allocation {
+    pub fn new(
+        th: &mut Thread,
+        len: usize,
+        mut init: impl FnMut(&mut Thread, usize) -> T,
+    ) -> Handle<Self>
+    where
+        T: Allocation,
+    {
         let mut result = th.allocate_varsize::<Self>(len);
         let arr = result.as_mut().as_mut_ptr();
         for i in 0..len {
             unsafe {
                 let data = (*arr).data.as_mut_ptr().add(i);
-                
+
                 let res = init(th, i);
                 th.write_barrier(result);
                 data.write(res);
@@ -78,13 +89,15 @@ impl<T: Object> Array<T> {
     }
 }
 
-impl<T: Object + ?Sized> Object for Handle<T> {
+unsafe impl<T: Object + ?Sized> Object for Handle<T> {
     fn trace(&self, visitor: &mut dyn Visitor) {
-        visitor.visit(self.ptr.as_ptr());
+        unsafe {
+            visitor.visit(self.ptr.as_ptr());
+        }
     }
 }
 
-impl<T: Object> Object for Array<T> {
+unsafe impl<T: Object> Object for Array<T> {
     fn finalize(&mut self) {
         unsafe {
             core::ptr::drop_in_place(std::slice::from_raw_parts_mut(
@@ -128,7 +141,7 @@ impl<T: Object> Object for Array<T> {
     }
 }
 
-impl<T: Object + Sized + Allocation> Allocation for Array<T> {
+unsafe impl<T: Object + Sized + Allocation> Allocation for Array<T> {
     const FINALIZE: bool = std::mem::needs_drop::<T>();
     const DESTRUCTIBLE: bool = true;
     const SIZE: usize = size_of::<Self>();
@@ -185,5 +198,3 @@ impl<T: Object + Ord> Ord for Array<T> {
         self.as_ref().cmp(other.as_ref())
     }
 }
-
-

@@ -895,7 +895,7 @@ impl SlotVisitor {
 }
 
 impl Visitor for SlotVisitor {
-    fn visit(&mut self, obj: *const u8) {
+    unsafe fn visit(&mut self, obj: *const u8) {
         unsafe {
             let obj = obj.cast::<HeapObjectHeader>().sub(1);
             if self.mark_ctx().mark(obj) {
@@ -906,7 +906,7 @@ impl Visitor for SlotVisitor {
         }
     }
 
-    fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize) {
+    unsafe fn visit_conservative(&mut self, ptrs: *const *const u8, len: usize) {
         unsafe {
             for i in 0..len {
                 let ptr = ptrs.add(i).read();

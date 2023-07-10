@@ -12,7 +12,7 @@ pub struct TreeNode {
 }
 
 
-impl Object for TreeNode {
+unsafe impl Object for TreeNode {
     fn trace(&self, visitor: &mut dyn rsgc::system::traits::Visitor) {
         if let Some(ref left) = self.left {
             left.trace(visitor);
@@ -24,7 +24,7 @@ impl Object for TreeNode {
     }
 }
 
-impl Allocation for TreeNode {
+unsafe impl Allocation for TreeNode {
     const FINALIZE: bool = false;
     const DESTRUCTIBLE: bool = false;
 }

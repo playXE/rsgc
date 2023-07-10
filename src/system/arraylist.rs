@@ -80,20 +80,15 @@ impl<T: Object> RawArray<T> {
     }
 }
 
-impl<T: Object> Object for RawArray<T> {
+unsafe impl<T: Object> Object for RawArray<T> {
     fn trace_range(&self, from: usize, to: usize, visitor: &mut dyn crate::system::traits::Visitor) {
-        /*//println!("RAW ARRAY({}) trace: {}->{}", std::any::type_name::<T>(), from, to);
-        for val in self.as_slice()[from..to].iter() {
-            unsafe { val.assume_init_ref().trace(visitor); }
-        }*/
-
         unsafe {
             visitor.visit_conservative(self.data.as_ptr().add(from).cast(), to - from);
         }
     }
 }
 
-impl<T: Object + Allocation> Allocation for RawArray<T> {
+unsafe impl<T: Object + Allocation> Allocation for RawArray<T> {
     const VARSIZE: bool = true;
     const NO_HEAP_PTRS: bool = false;
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
@@ -868,13 +863,13 @@ impl<T: Object + Allocation> DerefMut for ArrayList<T> {
     }
 }
 
-impl<T: Object + Allocation> Object for ArrayList<T> {
+unsafe impl<T: Object + Allocation> Object for ArrayList<T> {
     fn trace(&self, visitor: &mut dyn crate::system::traits::Visitor) {
         self.array.trace(visitor);
     }
 }
 
-impl<T: Object + Allocation> Allocation for ArrayList<T> {}
+unsafe impl<T: Object + Allocation> Allocation for ArrayList<T> {}
 
 pub const fn next_capacity<T>(capacity: usize) -> usize {
     let elem_size = core::mem::size_of::<T>();

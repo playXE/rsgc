@@ -70,7 +70,7 @@ impl<K: Object + PartialEq, V: Object + PartialEq> PartialEq for Node<K, V> {
     }
 }
 
-impl<K: Object, V: Object> Object for Node<K, V> {
+unsafe impl<K: Object, V: Object> Object for Node<K, V> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         self.key.trace(visitor);
         self.value.trace(visitor);
@@ -78,7 +78,7 @@ impl<K: Object, V: Object> Object for Node<K, V> {
     }
 }
 
-impl<K: Object, V: Object> Allocation for Node<K, V> {}
+unsafe impl<K: Object, V: Object> Allocation for Node<K, V> {}
 
 pub enum DefaultHashBuilder {}
 
@@ -449,13 +449,13 @@ where
     state.finish()
 }
 
-impl<K: Object, V: Object, S: 'static> Object for HashMap<K, V, S> {
+unsafe impl<K: Object, V: Object, S: 'static> Object for HashMap<K, V, S> {
     fn trace(&self, visitor: &mut dyn Visitor) {
         self.table.trace(visitor);
     }
 }
 
-impl<K: Object, V: Object, S: 'static> Allocation for HashMap<K, V, S> {}
+unsafe impl<K: Object, V: Object, S: 'static> Allocation for HashMap<K, V, S> {}
 
 pub struct Iter<'a, K: Object, V: Object, S> {
     map: &'a HashMap<K, V, S>,

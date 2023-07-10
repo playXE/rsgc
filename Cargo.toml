@@ -1,7 +1,13 @@
 [package]
 name = "rsgc"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+authors = ["Adel Prokurov <adel.prokurov@gmail.com>"]
+description = "Concurrent GC library for Rust"
+license = "BSD-2-Clause"
+readme = "README.md"
+repository = "https://github.com/playxe/rsgc"
+keywords = ["gc", "garbage collector", "concurrent"]
 
 
 [dependencies]
