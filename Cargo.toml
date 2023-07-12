@@ -1,6 +1,6 @@
 [package]
 name = "rsgc"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Adel Prokurov <adel.prokurov@gmail.com>"]
 description = "Concurrent GC library for Rust"
