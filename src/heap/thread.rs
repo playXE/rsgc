@@ -319,7 +319,16 @@ impl Thread {
     #[inline]
     pub fn write_barrier<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
         unsafe {
-            self.raw_write_barrier(handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast());
+            self.raw_write_barrier::<true>(handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast());
+        }
+    }   
+
+    /// Same as `write_barrier` but does not filter marked objects, instead they are filtered
+    /// when flushing SATB buffer to collector.
+    #[inline]
+    pub fn write_barrier_no_filter<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
+        unsafe {
+            self.raw_write_barrier::<false>(handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast());
         }
     }
 
@@ -339,13 +348,13 @@ impl Thread {
     ///
     /// In passive mode does nothing.
     #[inline]
-    pub unsafe fn raw_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
+    pub unsafe fn raw_write_barrier<const FILTER_SATB: bool>(&mut self, obj: *mut HeapObjectHeader) {
         // Yuasa deletion barrier implementation
         // Capture white<-black writes
         #[cfg(feature = "gc-satb")]
         if self.cm_in_progress {
             // Filter marked objects before hitting the SATB queues.
-            if !(*self.mark_bitmap).check_bit(obj as _) {
+            if FILTER_SATB && !(*self.mark_bitmap).check_bit(obj as _) {
                 if !self.satb_mark_queue.try_enqueue(obj as _) {
                     self.slow_write_barrier(obj);
                 }
@@ -369,7 +378,7 @@ impl Thread {
     #[cold]
     unsafe fn slow_write_barrier(&mut self, obj: *mut HeapObjectHeader) {
         self.flush_ssb();
-        self.raw_write_barrier(obj);
+        self.raw_write_barrier::<true>(obj);
     }
 
     /// Flush SSB queue. This function is called when SSB queue is full.
