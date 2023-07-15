@@ -204,7 +204,7 @@ impl Thread {
         }
     }
 
-    pub unsafe fn allocate_raw_init(&mut self, size: usize, vt: *const VTable, no_heap_ptrs: bool) -> *mut u8 {
+    pub unsafe fn allocate_raw_init(&mut self, size: usize, vt: *const VTable, no_heap_ptrs: bool, finalize: bool) -> *mut u8 {
         let mem = self.allocate_raw(size);
         let obj = mem as *mut HeapObjectHeader;
         (*obj).word = 0;
@@ -221,7 +221,7 @@ impl Thread {
             (*self.mark_bitmap).set_bit(obj as _);
         }
 
-        if T::FINALIZE {
+        if finalize {
             register_for_finalization(handle);
         }
         obj.add(1) as _
