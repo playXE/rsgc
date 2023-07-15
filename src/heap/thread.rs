@@ -204,6 +204,29 @@ impl Thread {
         }
     }
 
+    pub unsafe fn allocate_raw_init(&mut self, size: usize, vt: *const VTable, no_heap_ptrs: bool) -> *mut u8 {
+        let mem = self.allocate_raw(size);
+        let obj = mem as *mut HeapObjectHeader;
+        (*obj).word = 0;
+        (*obj).set_vtable(vt as _);
+        (*obj).set_heap_size(size);
+
+        if no_heap_ptrs {
+            (*obj).set_no_heap_ptrs();
+        }
+
+
+        {
+            // Need to maintain black-mutator invariant with SATB
+            (*self.mark_bitmap).set_bit(obj as _);
+        }
+
+        if T::FINALIZE {
+            register_for_finalization(handle);
+        }
+        obj.add(1) as _
+    }
+
     /// Allocates raw memory, unsafe to use outside of RSGC impl itself.
     ///
     /// ## TODO
