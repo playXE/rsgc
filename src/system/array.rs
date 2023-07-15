@@ -43,6 +43,43 @@ impl<T: 'static + Object + Sized> Array<T> {
         }
         unsafe { result.assume_init() }
     }
+
+    pub fn from_slice(th: &mut Thread, slice: &[T]) -> Handle<Array<T>>
+    where
+        T: Allocation + Clone,
+    {
+        let mut result = th.allocate_varsize::<Self>(slice.len());
+        let arr = result.as_mut().as_mut_ptr();
+
+        for (i, val) in slice.iter().enumerate() {
+            unsafe {
+                let data = (*arr).data.as_mut_ptr().add(i);
+                th.write_barrier(result);
+                data.write(val.clone());
+                (*arr).init_length += 1;
+            }
+        }
+
+        unsafe { result.assume_init() }
+    }
+}
+
+impl<T: num_traits::PrimInt + Object> Array<T> {
+    pub fn zeroed(th: &mut Thread, len: usize) -> Handle<Array<T>>
+    where
+        T: Allocation,
+    {
+        let mut result = th.allocate_varsize::<Self>(len);
+        let arr = result.as_mut().as_mut_ptr();
+
+        unsafe {
+            let data = (*arr).data.as_mut_ptr();
+            std::ptr::write_bytes(data, 0, len);
+            (*arr).init_length = len as _;
+        }
+
+        unsafe { result.assume_init() }
+    }
 }
 
 impl<T: Object> Deref for Array<T> {
