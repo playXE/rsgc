@@ -80,7 +80,24 @@ impl<T: num_traits::PrimInt + Object> Array<T> {
 
         unsafe { result.assume_init() }
     }
+
+    pub fn copy_from(th: &mut Thread, slice: &[T]) -> Handle<Array<T>>
+    where
+        T: Allocation,
+    {
+        let mut result = th.allocate_varsize::<Self>(slice.len());
+        let arr = result.as_mut().as_mut_ptr();
+
+        unsafe {
+            let data = (*arr).data.as_mut_ptr();
+            std::ptr::copy_nonoverlapping(slice.as_ptr(), data, slice.len());
+            (*arr).init_length = slice.len() as _;
+        }
+
+        unsafe { result.assume_init() }
+    }
 }
+
 
 impl<T: Object> Deref for Array<T> {
     type Target = [T];
