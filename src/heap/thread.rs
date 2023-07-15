@@ -10,7 +10,6 @@ use std::{
     thread::{JoinHandle, ThreadId},
 };
 
-use crate::{heap::tlab::ThreadLocalAllocBuffer, system::finalizer::register_for_finalization};
 use crate::{
     formatted_size,
     heap::{align_down, mark::MarkTask, stack::approximate_stack_pointer},
@@ -28,6 +27,7 @@ use crate::{
         machine_context::{registers_from_ucontext, PlatformRegisters},
     },
 };
+use crate::{heap::tlab::ThreadLocalAllocBuffer, system::finalizer::register_for_finalization};
 
 use super::{
     align_usize,
@@ -147,7 +147,7 @@ impl Thread {
             {
                 // Need to maintain black-mutator invariant with SATB
                 (*self.mark_bitmap).set_bit(obj as _);
-            }   
+            }
 
             let handle = Handle::from_raw(obj.add(1).cast());
 
@@ -156,8 +156,6 @@ impl Thread {
             }
 
             handle
-
-            
         }
     }
 
@@ -193,7 +191,7 @@ impl Thread {
                 // Need to maintain black-mutator invariant with SATB
                 (*self.mark_bitmap).set_bit(obj as _);
             }
-            
+
             let handle = Handle::from_raw(obj.add(1).cast());
 
             if T::FINALIZE {
@@ -204,7 +202,13 @@ impl Thread {
         }
     }
 
-    pub unsafe fn allocate_raw_init(&mut self, size: usize, vt: *const VTable, no_heap_ptrs: bool, finalize: bool) -> *mut u8 {
+    pub unsafe fn allocate_raw_init(
+        &mut self,
+        size: usize,
+        vt: *const VTable,
+        no_heap_ptrs: bool,
+        finalize: bool,
+    ) -> *mut u8 {
         let mem = self.allocate_raw(size);
         let obj = mem as *mut HeapObjectHeader;
         (*obj).word = 0;
@@ -215,14 +219,13 @@ impl Thread {
             (*obj).set_no_heap_ptrs();
         }
 
-
         {
             // Need to maintain black-mutator invariant with SATB
             (*self.mark_bitmap).set_bit(obj as _);
         }
 
         if finalize {
-            register_for_finalization(handle);
+            register_for_finalization(Handle::<()>::from_raw(obj.add(1).cast()));
         }
         obj.add(1) as _
     }
@@ -284,7 +287,11 @@ impl Thread {
         self.tlab.retire(self.id);
 
         let tlab_size = self.max_tlab_size;
-        let mut req = AllocRequest::new(super::AllocType::ForLAB, heap().options().min_tlab_size, tlab_size);
+        let mut req = AllocRequest::new(
+            super::AllocType::ForLAB,
+            heap().options().min_tlab_size,
+            tlab_size,
+        );
         let mem = heap().allocate_memory(&mut req);
 
         if mem.is_null() {
@@ -342,16 +349,20 @@ impl Thread {
     #[inline]
     pub fn write_barrier<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
         unsafe {
-            self.raw_write_barrier::<true>(handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast());
+            self.raw_write_barrier::<true>(
+                handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast(),
+            );
         }
-    }   
+    }
 
     /// Same as `write_barrier` but does not filter marked objects, instead they are filtered
     /// when flushing SATB buffer to collector.
     #[inline]
     pub fn write_barrier_no_filter<T: Object + ?Sized>(&mut self, handle: Handle<T>) {
         unsafe {
-            self.raw_write_barrier::<false>(handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast());
+            self.raw_write_barrier::<false>(
+                handle.as_ptr().sub(size_of::<HeapObjectHeader>()).cast(),
+            );
         }
     }
 
@@ -371,7 +382,10 @@ impl Thread {
     ///
     /// In passive mode does nothing.
     #[inline]
-    pub unsafe fn raw_write_barrier<const FILTER_SATB: bool>(&mut self, obj: *mut HeapObjectHeader) {
+    pub unsafe fn raw_write_barrier<const FILTER_SATB: bool>(
+        &mut self,
+        obj: *mut HeapObjectHeader,
+    ) {
         // Yuasa deletion barrier implementation
         // Capture white<-black writes
         #[cfg(feature = "gc-satb")]
@@ -405,14 +419,19 @@ impl Thread {
     }
 
     /// Flush SSB queue. This function is called when SSB queue is full.
-    /// 
+    ///
     /// Writes are pushed to global SATB queue. If object is already marked it is not pushed to SATB queue.
     pub fn flush_ssb(&mut self) {
         let heap = heap();
         unsafe {
             for i in self.satb_mark_queue.index..heap.options().max_satb_buffer_size {
                 let obj = self.satb_mark_queue.buf.add(i).read();
-                assert!(heap.is_in(obj), "not in heap: {:p} (cm_in_progress?={})", obj, self.cm_in_progress);
+                assert!(
+                    heap.is_in(obj),
+                    "not in heap: {:p} (cm_in_progress?={})",
+                    obj,
+                    self.cm_in_progress
+                );
                 // GC can do some progress in background and already mark object that was in SSB.
                 if !(*self.mark_ctx).is_marked(obj as _) || cfg!(feature = "gc-incremental-update")
                 {
@@ -629,7 +648,6 @@ pub fn safepoint_scope_conditional<R>(enter: bool, cb: impl FnOnce() -> R) -> R 
     let thread = Thread::current();
     #[cfg(not(windows))]
     unsafe {
-        
         extern "C" {
             #[allow(improper_ctypes)]
             fn getcontext(ctx: *mut libc::ucontext_t) -> i32;
@@ -694,7 +712,6 @@ pub fn safepoint_scope<R>(cb: impl FnOnce() -> R) -> R {
 }
 
 static mut SINK: u8 = 0;
-
 
 #[thread_local]
 static mut THREAD: Thread = Thread {
@@ -833,7 +850,6 @@ where
     });
     GCAwareJoinHandle { join }
 }
-
 
 pub struct GCAwareJoinHandle<R> {
     join: JoinHandle<R>,
