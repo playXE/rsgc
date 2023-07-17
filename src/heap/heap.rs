@@ -493,6 +493,14 @@ impl Heap {
         result
     }
 
+    pub fn get_used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    pub fn get_available(&self) -> usize {
+        self.free_set.available()
+    }
+
     pub(crate) fn rebuild_free_set(&mut self, concurrent: bool) {
         let _ = concurrent;
         self.free_set.rebuild();

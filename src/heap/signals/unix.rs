@@ -28,7 +28,7 @@ pub unsafe extern "C" fn handle_sigsegv(
     if safepoint::addr_in_safepoint((*info).si_addr() as _) {
         let thread = Thread::current();
         thread.platform_registers = registers_from_ucontext(context);
-
+       
         log::trace!(target: "gc-safepoint", "{:?} reached safepoint", std::thread::current().id());
         // basically spin-loop that waits for safepoint to be disabled
         thread.enter_safepoint(get_sp_from_ucontext(context).cast());
@@ -46,7 +46,7 @@ pub unsafe extern "C" fn segv_handler(sig: i32, info: *mut siginfo_t, context: *
     if safepoint::addr_in_safepoint((*info).si_addr() as usize) {
         let thread = Thread::current();
         thread.platform_registers = registers_from_ucontext(context);
-
+        println!("GC {}", std::backtrace::Backtrace::force_capture());
         log::trace!(target: "gc-safepoint", "{:?} reached safepoint", std::thread::current().id());
         // basically spin-loop that waits for safepoint to be disabled
         thread.enter_safepoint(get_sp_from_ucontext(context).cast());
