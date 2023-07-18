@@ -1,37 +1,20 @@
 [package]
-name = "rsgc"
-version = "1.1.0"
+name = "immix"
+version = "0.1.0"
 edition = "2021"
-authors = ["Adel Prokurov <adel.prokurov@gmail.com>"]
-description = "Concurrent GC library for Rust"
-license = "BSD-2-Clause"
-readme = "README.md"
-repository = "https://github.com/playxe/rsgc"
-keywords = ["gc", "concurrent"]
 
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 libc = "0.2"
-cfg-if = "1.0"
 parking_lot = "0.12"
-parking_lot_core = "0.9"
+rsetjmp = { git = "https://github.com/playxe/rsetjmp" }
+cfg-if = "1.0"
 log = "0.4"
-thread_local = "1.1"
-num-traits = "0.2"
-rand = "0.8"
-once_cell = "1"
 env_logger = "0.10"
-num_cpus = "1.13"
-scoped-thread-pool = "1.0"
-errno = "0.3"
-paste = "1.0"
-crossbeam-deque = "0.8"
-crossbeam-queue = "0.3"
-atomic = "0.5"
-error-code = "2.3"
-
-[dependencies.memoffset]
-version = "0.9"
+[profile.release]
+opt-level = 2
+lto = true
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [
@@ -45,18 +28,3 @@ winapi = { version = "0.3", features = [
     
 ] }
 
-[features]
-conditional-safepoint = []
-gc-satb = []
-gc-incremental-update = []
-gc-passive = []
-default = ["gc-satb"]
-
-[profile.release]
-lto = true
-strip = true
-codegen-units = 1
-
-[lib]
-name = "rsgc"
-crate-type = ["cdylib", "rlib", "staticlib"]
