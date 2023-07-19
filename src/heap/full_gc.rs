@@ -64,7 +64,7 @@ impl FullGC {
                 if self.heap.marking_context().is_marked(header) {
                     pointer
                 } else {
-                    println!("NULL");
+                  
                     null_mut()
                 }
             });

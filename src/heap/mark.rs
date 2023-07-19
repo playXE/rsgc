@@ -145,6 +145,7 @@ impl<'a> MarkingTask<'a> {
             if !(*obj).vtable().varsize.is_varsize {
                 (*obj).visit(self.visitor);
             } else if (*obj).vtable().varsize.is_varsize {
+
                 self.do_chunked_array_start(obj);
             } else {
                 // primitive array or no heap pointers

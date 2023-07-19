@@ -204,7 +204,7 @@ unsafe impl<T: Object + Sized + Allocation> Allocation for Array<T> {
     const VARSIZE: bool = true;
     const VARSIZE_ITEM_SIZE: usize = size_of::<T>();
     const VARSIZE_OFFSETOF_LENGTH: usize = offset_of!(Self, length);
-    const VARSIZE_OFFSETOF_CAPACITY: usize = 0;
+    const VARSIZE_OFFSETOF_CAPACITY: usize = offset_of!(Self, length);
     const VARSIZE_OFFSETOF_VARPART: usize = size_of::<usize>();
 }
 use std::fmt;

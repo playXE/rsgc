@@ -245,7 +245,7 @@ where
 
         thread.write_barrier(tab);
         tab[i] = Some(node);
-        
+
         self.mod_count += 1;
         self.size += 1;
         if self.size > self.threshold {
@@ -292,7 +292,7 @@ where
         let mut newtab = Array::new(thread, new_cap as _, |_, _| None);
         thread.write_barrier(*self);
         self.table = Some(newtab);
-        
+
         if let Some(mut old_tab) = old_tab {
             for j in 0..old_cap {
                 let mut e = old_tab[j as usize];

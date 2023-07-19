@@ -149,7 +149,7 @@ impl Thread {
                 (*self.mark_bitmap).set_bit(obj as _);
             }
 
-            let handle = Handle::from_raw(obj.add(1).cast());
+            let handle: Handle<T> = Handle::from_raw(obj.add(1).cast());
 
             if T::FINALIZE {
                 register_for_finalization(handle);
@@ -197,7 +197,7 @@ impl Thread {
             if T::FINALIZE {
                 register_for_finalization(handle);
             }
-
+            
             handle
         }
     }

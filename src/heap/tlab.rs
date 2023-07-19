@@ -43,8 +43,16 @@ impl ThreadLocalAllocBuffer {
                 (*self.bitmap).set_bit(obj);
             }
 
-            //println!("allocate {:p}->{:p} ({})", obj as *mut u8, (obj + size) as *mut u8, size);
+          
             unsafe { debug_assert_eq!((*self.bitmap).find_object_start(obj) as usize, obj, "allocated {:p} but found {:p}", obj as *mut u8, (*self.bitmap).find_object_start(obj) as *mut u8); }
+            unsafe {
+                let end = self.top;
+                let start = (*self.bitmap).find_object_start(end) as usize;
+                if start != obj {
+                    debug_assert!(obj + size <= start);
+                }
+
+            }
             return obj as _;
         }
 
