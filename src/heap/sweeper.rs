@@ -48,7 +48,7 @@ impl SweepGarbageClosure {
                 }
 
                 if !marking_context.is_marked(header) {
-                    
+                  
                     begin += size;
                     continue;
                 }

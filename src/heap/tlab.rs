@@ -42,17 +42,8 @@ impl ThreadLocalAllocBuffer {
             unsafe {
                 (*self.bitmap).set_bit(obj);
             }
-
-          
-            unsafe { debug_assert_eq!((*self.bitmap).find_object_start(obj) as usize, obj, "allocated {:p} but found {:p}", obj as *mut u8, (*self.bitmap).find_object_start(obj) as *mut u8); }
-            unsafe {
-                let end = self.top;
-                let start = (*self.bitmap).find_object_start(end) as usize;
-                if start != obj {
-                    debug_assert!(obj + size <= start);
-                }
-
-            }
+            
+            unsafe { debug_assert!((*self.bitmap).check_bit(obj), "allocated {:p} but not found", obj as *mut u8); }
             return obj as _;
         }
 

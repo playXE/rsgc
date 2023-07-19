@@ -304,7 +304,8 @@ impl Thread {
             mem.add(size) as _,
             mem.add(req.actual_size()) as _,
         );
-        (*self.tlab.bitmap).set_atomic(mem as _);
+        (*self.tlab.bitmap).set_bit(mem as _);
+    
         mem
     }
 
@@ -386,6 +387,7 @@ impl Thread {
         &mut self,
         obj: *mut HeapObjectHeader,
     ) {
+        let _ = obj;
         // Yuasa deletion barrier implementation
         // Capture white<-black writes
         #[cfg(feature = "gc-satb")]

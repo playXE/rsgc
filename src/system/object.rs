@@ -16,7 +16,7 @@ use crate::{
     utils::bitfield::BitField,
     heap::{
         align_usize, atomic_cmpxchg_weak, atomic_load, atomic_store, free_list::Entry,
-        thread::Thread,
+        thread::Thread, heap::heap,
     },
 };
 
@@ -613,12 +613,14 @@ unsafe impl<T: Object + ?Sized> Allocation for Handle<T> {
 impl<T: Object + Sized> Deref for Handle<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
+        unsafe { debug_assert!(heap().is_live(self.ptr.as_ptr().sub(8) as _), "dead access: {:p}", self.ptr.as_ptr().sub(8)); }
         self.as_ref()
     }
 }
 
 impl<T: Object + Sized> DerefMut for Handle<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { debug_assert!(heap().is_live(self.ptr.as_ptr().sub(8) as _), "dead access: {:p}", self.ptr.as_ptr().sub(8)); }
         self.as_mut()
     }
 }

@@ -591,7 +591,8 @@ impl Heap {
     }
 
     pub fn is_live(&self, addr: *mut u8) -> bool {
-        if self.mem.contains(addr as _) {
+        if !self.mem.contains(addr as _) {
+            
             return false;
         }
         let index = self.region_index(addr);
@@ -607,6 +608,7 @@ impl Heap {
             }
 
             let bitmap = &(*region).object_start_bitmap;
+           
             bitmap.check_bit(addr as usize)
         }
     }
