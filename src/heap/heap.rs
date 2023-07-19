@@ -592,7 +592,7 @@ impl Heap {
 
     pub fn is_live(&self, addr: *mut u8) -> bool {
         if !self.mem.contains(addr as _) {
-            
+           
             return false;
         }
         let index = self.region_index(addr);

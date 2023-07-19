@@ -80,6 +80,7 @@ impl Visitor for MarkingContext {
     unsafe fn visit(&mut self, object: *const u8) {
         let obj = (object as *const HeapObjectHeader).sub(1);
         if self.mark(obj) {
+        
             self.visit_count.fetch_add(1, atomic::Ordering::Relaxed);
             self.mark_queues()
                 .injector()

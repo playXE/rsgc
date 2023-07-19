@@ -1,5 +1,5 @@
 //! Marking phase of the GC.
-//! 
+//!
 //! Implements simple marking algorithm that uses a work stealing queue to distribute marking work between worker threads.
 //! Marking tasks can be terminated if GC is cancelled which allows us to start STW GC as soon as possible.
 
@@ -145,7 +145,6 @@ impl<'a> MarkingTask<'a> {
             if !(*obj).vtable().varsize.is_varsize {
                 (*obj).visit(self.visitor);
             } else if (*obj).vtable().varsize.is_varsize {
-
                 self.do_chunked_array_start(obj);
             } else {
                 // primitive array or no heap pointers
@@ -655,11 +654,11 @@ if #[cfg(target_pointer_width="64")] {
                 pub const POW_BITS: u8 = 5;
                 pub const CHUNK_MAX: usize = nth_bit(Self::CHUNK_BITS as usize) - 1;
                 pub const POW_MAX: usize = nth_bit(Self::POW_BITS as usize) - 1;
-            
+
                 #[inline]
                 pub fn new(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool) -> Self {
                     Self {
-                        obj: obj as usize, 
+                        obj: obj as usize,
                         skip_live,
                         weak,
                         chunk: 0,
@@ -670,7 +669,7 @@ if #[cfg(target_pointer_width="64")] {
                 #[inline]
                 pub fn new2(obj: *mut HeapObjectHeader, skip_live: bool, weak: bool, chunk: usize, pow: usize) -> Self {
                     Self {
-                        obj: obj as usize, 
+                        obj: obj as usize,
                         skip_live,
                         weak,
                         chunk: chunk as i32,
@@ -687,7 +686,7 @@ if #[cfg(target_pointer_width="64")] {
                 pub fn chunk(self) -> usize {
                     self.chunk as usize
                 }
-                
+
                 #[inline]
                 pub fn pow(self) -> usize {
                     self.pow as usize
@@ -702,7 +701,7 @@ if #[cfg(target_pointer_width="64")] {
                 pub fn is_weak(self) -> bool {
                     self.weak
                 }
-                
+
                 #[inline]
                 pub fn count_liveness(self) -> bool {
                     !self.skip_live
@@ -900,9 +899,7 @@ impl Visitor for SlotVisitor {
         unsafe {
             let obj = obj.cast::<HeapObjectHeader>().sub(1);
             if self.mark_ctx().mark(obj) {
-                if (*obj).should_trace() {
-                    self.push(MarkTask::new(obj as _, false, false));
-                }
+                self.push(MarkTask::new(obj as _, false, false));
             }
         }
     }

@@ -20,7 +20,9 @@ unsafe impl<K: Object, V: Object> Object for HashNode<K, V> {
     fn trace(&self, visitor: &mut dyn crate::prelude::Visitor) {
         self.key.trace(visitor);
         self.value.trace(visitor);
-        self.next.trace(visitor);
+        if let Some(next) = self.next {
+            next.trace(visitor);
+        }
     }
 }
 
@@ -61,7 +63,7 @@ impl<K: Object, V: Object> HashMap<K, V> {
     }
 }
 
-impl<K: Hash + PartialEq + Object, V: Object> HashMap<K, V> {
+impl<K: Hash + PartialEq + Object + std::fmt::Debug, V: Object> HashMap<K, V> {
     fn rehash_buckets(
         t: &mut Thread,
         src: Handle<Array<Option<Handle<HashNode<K, V>>>>>,
@@ -72,14 +74,16 @@ impl<K: Hash + PartialEq + Object, V: Object> HashMap<K, V> {
 
             while let Some(mut entry) = bucket {
                 let next = entry.next;
-
+                
                 let mut hasher = DefaultHasher::new();
                 entry.key.hash(&mut hasher);
                 let hash = hasher.finish();
                 let j = hash as usize % dst.len();
-                t.write_barrier(entry);
+                if let Some(e) = dst[j] {
+                    t.write_barrier(e);
+                }
                 entry.next = dst[j];
-                t.write_barrier(dst);
+                t.write_barrier(entry);
                 dst[j] = Some(entry);
 
                 bucket = next;
@@ -284,7 +288,7 @@ pub struct VacantEntry<'a, K: Object + Hash, V: Object> {
     hash: u64,
 }
 
-impl<'a, K: 'static + Object + Hash, V: 'static + Object> VacantEntry<'a, K, V> {
+impl<'a, K: 'static + Object + Hash + std::fmt::Debug, V: 'static + Object> VacantEntry<'a, K, V> {
     pub fn key(&self) -> &K {
         &self.key
     }
@@ -329,7 +333,7 @@ pub struct OccupiedEntry<'a, K: Object, V: Object> {
     node: Handle<HashNode<K, V>>,
 }
 
-impl<'a, K: 'static + Object, V: 'static + Object> OccupiedEntry<'a, K, V> {
+impl<'a, K: 'static + Object + std::fmt::Debug, V: 'static + Object> OccupiedEntry<'a, K, V> {
     pub fn key(&self) -> &K {
         &self.node.key
     }
@@ -367,32 +371,22 @@ impl<'a, K: Object, V: Object> Iterator for Iter<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.entry.is_none() {
-            let nodes = self.map.nodes;
-
-            if self.index >= nodes.len() {
-                return None;
-            }
-
-            while self.index < nodes.len() {
-                let bucket = &self.map.nodes[self.index];
-
-                if let Some(entry) = bucket {
-                    self.entry = Some(entry);
-                    break;
-                }
-
-                self.index += 1;
-            }
-        }
-
         if let Some(entry) = self.entry {
-            let key = &entry.key;
-            let value = entry.value.as_ref().unwrap();
-            self.entry = entry.next.as_ref();
-            Some((key, value))
-        } else {
-            None
+            let next = &entry.next;
+            self.entry = next.as_ref();
+            return Some((&entry.key, entry.value.as_ref().unwrap()));
         }
+
+        while self.index < self.map.nodes.len() {
+            let entry = &self.map.nodes[self.index];
+            self.index += 1;
+
+            if let Some(entry) = entry {
+                self.entry = entry.next.as_ref();
+                return Some((&entry.key, entry.value.as_ref().unwrap()));
+            }
+        }
+
+        None
     }
 }
