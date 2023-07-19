@@ -36,7 +36,7 @@ impl SweepGarbageClosure {
         let mut used = 0;
         let mut free = 0;
 
-        if true || marking_context.is_marked_range(begin, end) {
+        if marking_context.is_marked_range(begin, end) {
             while begin != end {
                 let header = begin as *mut HeapObjectHeader;
 
