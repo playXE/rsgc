@@ -82,8 +82,10 @@ impl<T: Object> RawArray<T> {
 
 unsafe impl<T: Object> Object for RawArray<T> {
     fn trace_range(&self, from: usize, to: usize, visitor: &mut dyn crate::system::traits::Visitor) {
-        unsafe {
-            visitor.visit_conservative(self.data.as_ptr().add(from).cast(), to - from);
+        for i in from..to {
+            unsafe {
+                (*self.data.as_ptr().add(i)).assume_init_ref().trace(visitor);
+            }
         }
     }
 }

@@ -466,7 +466,7 @@ impl Heap {
         // Full GC, which means we want to try more than 3 times.
         let mut tries = 0;
 
-        while result.is_null() && tries <= 3 {
+        while result.is_null() && tries < 3 {
             tries += 1;
             self.controller_thread().handle_alloc_failure_gc(req);
 
